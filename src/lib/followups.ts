@@ -278,7 +278,16 @@ export async function createFollowupTicket(input: {
   return { id: newTicket.id, simulated: true };
 }
 
-export async function getClinicTicketsWithConversations(limit = 25) {
+let ticketsCache: any[] = [];
+let ticketsCacheTime = 0;
+const TICKETS_CACHE_TTL = 20_000; // 20s cache window to protect Freshdesk 50 req/min limit
+const conversationCache = new Map<string, { updatedAt: string; conversations: any[] }>();
+
+export function invalidateTicketsCache() {
+  ticketsCacheTime = 0;
+}
+
+export async function getClinicTicketsWithConversations(limit = 30) {
   if (!hasFreshdeskConfig()) {
     return localTickets.map(t => ({
       id: String(t.id),
@@ -296,25 +305,70 @@ export async function getClinicTicketsWithConversations(limit = 25) {
     }));
   }
 
-  try {
-    const tickets = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=${limit}&include=requester`);
-    if (!Array.isArray(tickets)) return [];
+  const logDebug = (msg: string) => {
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      fs.appendFileSync("scratch/debug_server.log", `[${new Date().toISOString()}] ${msg}\n`);
+    } catch {}
+  };
 
+  logDebug(`Called getClinicTicketsWithConversations. Cached: ${ticketsCache.length}, CacheAge: ${Date.now() - ticketsCacheTime}ms`);
+
+  const now = Date.now();
+  if (ticketsCache.length > 0 && now - ticketsCacheTime < TICKETS_CACHE_TTL) {
+    logDebug(`Serving from memory cache: ${ticketsCache.length} items`);
+    return ticketsCache;
+  }
+
+  try {
+    let tickets: any = null;
+    try {
+      tickets = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=${limit}&include=requester`);
+      logDebug(`Freshdesk API returned: isArray=${Array.isArray(tickets)}, length=${Array.isArray(tickets) ? tickets.length : typeof tickets}`);
+    } catch (reqErr: any) {
+      logDebug(`Freshdesk API threw error: ${reqErr?.message || reqErr}`);
+      if (reqErr?.message?.includes("429") || String(reqErr).includes("429")) {
+        if (ticketsCache.length > 0) {
+          logDebug(`429 caught; serving cached: ${ticketsCache.length}`);
+          return ticketsCache;
+        }
+      }
+      throw reqErr;
+    }
+
+    if (!Array.isArray(tickets)) {
+      if (ticketsCache.length > 0) return ticketsCache;
+      return [];
+    }
+
+    let convCalls = 0;
     const enriched = await Promise.all(
       tickets.map(async (t: any) => {
         let conversations: any[] = [];
-        try {
-          const convRes = await freshdeskRequest(`/tickets/${t.id}/conversations`);
-          if (Array.isArray(convRes)) {
-            conversations = convRes.map((c: any) => ({
-              id: String(c.id),
-              incoming: Boolean(c.incoming),
-              from: c.from_email || (c.incoming ? (t.requester?.name || "Patient / Doctor") : "Reception Desk Staff"),
-              message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
-              createdAt: c.created_at,
-            }));
+        const hasUpdates = t.created_at !== t.updated_at;
+
+        if (hasUpdates) {
+          const cached = conversationCache.get(String(t.id));
+          if (cached && cached.updatedAt === t.updated_at) {
+            conversations = cached.conversations;
+          } else if (convCalls < 5) {
+            convCalls++;
+            try {
+              const convRes = await freshdeskRequest(`/tickets/${t.id}/conversations`);
+              if (Array.isArray(convRes)) {
+                conversations = convRes.map((c: any) => ({
+                  id: String(c.id),
+                  incoming: Boolean(c.incoming),
+                  from: c.from_email || (c.incoming ? (t.requester?.name || "Patient / Doctor") : "Reception Desk Staff"),
+                  message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+                  createdAt: c.created_at,
+                }));
+              }
+            } catch { /* ignore individual conversation fetch */ }
+            conversationCache.set(String(t.id), { updatedAt: t.updated_at, conversations });
           }
-        } catch { /* ignore conversation fetch error */ }
+        }
 
         const requester = t.requester || {};
         const cleanBody = (t.description_text || t.description || "")
@@ -340,14 +394,19 @@ export async function getClinicTicketsWithConversations(limit = 25) {
         };
       })
     );
+
+    ticketsCache = enriched;
+    ticketsCacheTime = Date.now();
     return enriched;
   } catch (err) {
     console.warn("Could not load Freshdesk tickets:", err);
+    if (ticketsCache.length > 0) return ticketsCache;
     return [];
   }
 }
 
 export async function replyToFreshdeskTicket(ticketId: number | string, replyMessage: string) {
+  invalidateTicketsCache();
   if (!hasFreshdeskConfig()) {
     const existing = localTickets.find(t => String(t.id) === String(ticketId));
     if (existing) {

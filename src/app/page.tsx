@@ -493,7 +493,7 @@ export default function Home() {
   useEffect(() => {
     if (!user) return;
     void loadFollowupUpdates(true);
-    const id = setInterval(() => void loadFollowupUpdates(true), 15_000);
+    const id = setInterval(() => void loadFollowupUpdates(true), 30_000);
     return () => clearInterval(id);
   }, [user]);
 
@@ -588,7 +588,9 @@ export default function Home() {
       const response = await fetch("/api/follow-up/inbox");
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load follow-up records.");
-      setFollowupUpdates(body.updates || []);
+      if (Array.isArray(body.updates) && body.updates.length > 0) {
+        setFollowupUpdates(body.updates);
+      }
     } catch (error) {
       if (!silent) setToast(error instanceof Error ? error.message : "Follow-up service notice.");
     }
@@ -2349,6 +2351,21 @@ export default function Home() {
                       ? "No items match your filter criteria. Try clearing search filters."
                       : "Incoming patient and physician email replies will automatically appear here."}
                   </div>
+                  {(inboxSearch || inboxFilter !== "all") && (
+                    <div style={{ marginTop: "12px" }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ fontSize: "12px", padding: "6px 14px", margin: "0 auto" }}
+                        onClick={() => {
+                          setInboxFilter("all");
+                          setInboxSearch("");
+                        }}
+                      >
+                        Show All Messages ({followupUpdates.length})
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
