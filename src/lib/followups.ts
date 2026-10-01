@@ -224,6 +224,7 @@ export async function createFollowupTicket(input: {
         priority: input.priority || 1,
         status: 2,
         source: 2,
+        responder_id: 1130009360826, // Assign Receptionist agent so customer replies notify the receptionist!
         tags: input.tags,
         ...(uniqueCc.length ? { cc_emails: uniqueCc } : {}),
         ...(includeCompany && numComp ? { company_id: numComp } : {}),
@@ -275,6 +276,95 @@ export async function createFollowupTicket(input: {
   };
   localTickets.unshift(newTicket);
   return { id: newTicket.id, simulated: true };
+}
+
+export async function getClinicTicketsWithConversations(limit = 25) {
+  if (!hasFreshdeskConfig()) {
+    return localTickets.map(t => ({
+      id: String(t.id),
+      subject: t.subject,
+      email: t.email,
+      name: t.name,
+      status: 2,
+      priority: t.priority,
+      message: t.description_text || t.description,
+      createdAt: t.created_at,
+      updatedAt: t.created_at,
+      responderId: 1130009360826,
+      tags: t.tags,
+      conversations: [],
+    }));
+  }
+
+  try {
+    const tickets = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=${limit}&include=requester`);
+    if (!Array.isArray(tickets)) return [];
+
+    const enriched = await Promise.all(
+      tickets.map(async (t: any) => {
+        let conversations: any[] = [];
+        try {
+          const convRes = await freshdeskRequest(`/tickets/${t.id}/conversations`);
+          if (Array.isArray(convRes)) {
+            conversations = convRes.map((c: any) => ({
+              id: String(c.id),
+              incoming: Boolean(c.incoming),
+              from: c.from_email || (c.incoming ? (t.requester?.name || "Patient / Doctor") : "Reception Desk Staff"),
+              message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+              createdAt: c.created_at,
+            }));
+          }
+        } catch { /* ignore conversation fetch error */ }
+
+        const requester = t.requester || {};
+        const cleanBody = (t.description_text || t.description || "")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]*>/g, " ")
+          .replace(/&nbsp;/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        return {
+          id: String(t.id),
+          subject: t.subject || "Clinic Consultation",
+          email: requester.email || t.email || "",
+          name: requester.name || t.name || "Patient / Physician",
+          status: Number(t.status || 2),
+          priority: Number(t.priority || 1),
+          message: cleanBody.slice(0, 500),
+          createdAt: t.created_at,
+          updatedAt: t.updated_at,
+          responderId: t.responder_id,
+          tags: Array.isArray(t.tags) ? t.tags : [],
+          conversations,
+        };
+      })
+    );
+    return enriched;
+  } catch (err) {
+    console.warn("Could not load Freshdesk tickets:", err);
+    return [];
+  }
+}
+
+export async function replyToFreshdeskTicket(ticketId: number | string, replyMessage: string) {
+  if (!hasFreshdeskConfig()) {
+    const existing = localTickets.find(t => String(t.id) === String(ticketId));
+    if (existing) {
+      existing.description_text += `\n[Staff Reply]: ${replyMessage}`;
+    }
+    return { id: Date.now(), simulated: true };
+  }
+
+  const cleanId = String(ticketId).replace(/[^0-9]/g, "");
+  if (!cleanId) throw new Error("Invalid ticket ID for reply.");
+
+  const formattedBody = `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;"><p>${escapeHtml(replyMessage).replace(/\n/g, "<br/>")}</p><p style="margin-top: 16px; font-size: 12px; color: #64748b;">— Clinic Reception Desk</p></div>`;
+
+  return await freshdeskRequest(`/tickets/${cleanId}/reply`, {
+    method: "POST",
+    body: JSON.stringify({ body: formattedBody }),
+  });
 }
 
 export async function searchFollowupTickets(tag: string) {

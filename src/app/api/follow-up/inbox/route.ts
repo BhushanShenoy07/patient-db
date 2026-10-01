@@ -1,24 +1,45 @@
 import { NextResponse } from "next/server";
 import { readClinicSession } from "@/lib/auth";
-import { searchFollowupTickets } from "@/lib/followups";
+import { getClinicTicketsWithConversations, replyToFreshdeskTicket } from "@/lib/followups";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const session = readClinicSession(request);
-  if (!session) return NextResponse.json({ error: "Sign in to view patient updates." }, { status: 401 });
+  if (!session) return NextResponse.json({ error: "Sign in to view clinic communications." }, { status: 401 });
   try {
-    const result = await searchFollowupTickets("clinic_health_update");
-    const tickets = Array.isArray(result.results) ? result.results : [];
-    const updates = tickets.map((ticket: any) => ({
-      id: String(ticket.id), subject: String(ticket.subject || "Patient health update"),
-      email: String(ticket.email || ""), name: String(ticket.name || "Patient"),
-      message: String(ticket.description_text || ticket.description || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"),
-      createdAt: String(ticket.created_at || ""), priority: Number(ticket.priority || 1),
-    }));
-    return NextResponse.json({ updates });
+    const updates = await getClinicTicketsWithConversations(30);
+    return NextResponse.json({ ok: true, updates });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not load patient updates.";
+    const message = error instanceof Error ? error.message : "Could not load clinic communications.";
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
+}
+
+export async function POST(request: Request) {
+  const session = readClinicSession(request);
+  if (!session) return NextResponse.json({ error: "Sign in to dispatch clinic messages." }, { status: 401 });
+
+  try {
+    const body = await request.json().catch(() => ({}));
+    const ticketId = String(body.ticketId || "").trim();
+    const message = String(body.message || "").trim();
+
+    if (!ticketId || !message) {
+      return NextResponse.json({ error: "Ticket ID and reply content are required." }, { status: 400 });
+    }
+
+    const senderTitle =
+      session.role === "doctor" && session.doctorName
+        ? session.doctorName
+        : `Reception Desk (${session.name || "Receptionist"})`;
+
+    const formattedMessage = `${message}\n\n— Sent by ${senderTitle}`;
+
+    const res = await replyToFreshdeskTicket(ticketId, formattedMessage);
+    return NextResponse.json({ ok: true, id: res?.id, message: "Reply successfully delivered via Freshdesk." });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to dispatch reply.";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

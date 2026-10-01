@@ -6,7 +6,27 @@ import type { FormEvent } from "react";
 type Fields = Record<string, string>;
 type RecordItem = { id: string; fields: Fields };
 type ClinicUser = { email: string; name: string; role: "doctor" | "receptionist"; doctorName?: string };
-type FollowupUpdate = { id: string; subject: string; email: string; name: string; message: string; createdAt: string; priority: number };
+type FollowupConversation = {
+  id: string;
+  incoming: boolean;
+  from: string;
+  message: string;
+  createdAt: string;
+};
+
+type FollowupUpdate = {
+  id: string;
+  subject: string;
+  email: string;
+  name: string;
+  message: string;
+  createdAt: string;
+  priority: number;
+  status?: number;
+  updatedAt?: string;
+  tags?: string[];
+  conversations?: FollowupConversation[];
+};
 type DoctorOption = { name: string; specialization: string; email: string };
 
 const COL = {
@@ -201,6 +221,15 @@ function IconSettings({ size = 13 }: { size?: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function IconSend({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
     </svg>
   );
 }
@@ -417,6 +446,11 @@ export default function Home() {
   const [sendingMessageFor, setSendingMessageFor] = useState<string | null>(null);
   const [sendingFollowupFor, setSendingFollowupFor] = useState<string | null>(null);
   const [followupUpdates, setFollowupUpdates] = useState<FollowupUpdate[]>([]);
+  const [activeReplyTicketId, setActiveReplyTicketId] = useState<string | null>(null);
+  const [replyMessageText, setReplyMessageText] = useState("");
+  const [sendingReply, setSendingReply] = useState(false);
+  const [inboxFilter, setInboxFilter] = useState<"all" | "replies" | "urgent">("all");
+  const [inboxSearch, setInboxSearch] = useState("");
   const [doctorOptions, setDoctorOptions] = useState<DoctorOption[]>(FALLBACK_DOCTORS);
   const [month, setMonth] = useState(() => new Date());
   const [selectedDay, setSelectedDay] = useState(isoDate());
@@ -509,6 +543,24 @@ export default function Home() {
     );
   }, [patients, search]);
 
+  const filteredFollowupUpdates = useMemo(() => {
+    return followupUpdates.filter(u => {
+      if (inboxFilter === "replies" && (!u.conversations || u.conversations.length === 0)) return false;
+      if (inboxFilter === "urgent" && u.priority !== 4) return false;
+      if (inboxSearch.trim()) {
+        const q = inboxSearch.trim().toLowerCase();
+        const matchName = low(u.name).includes(q);
+        const matchEmail = low(u.email).includes(q);
+        const matchSubject = low(u.subject).includes(q);
+        const matchId = low(u.id).includes(q);
+        const matchMsg = low(u.message).includes(q);
+        const matchConv = (u.conversations || []).some(c => low(c.message).includes(q) || low(c.from).includes(q));
+        if (!matchName && !matchEmail && !matchSubject && !matchId && !matchMsg && !matchConv) return false;
+      }
+      return true;
+    });
+  }, [followupUpdates, inboxFilter, inboxSearch]);
+
   const daySlots = Array.from({ length: (END - START) / SLOT }, (_, i) => START + i * SLOT);
   const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);
   const monthDays = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
@@ -539,6 +591,28 @@ export default function Home() {
       setFollowupUpdates(body.updates || []);
     } catch (error) {
       if (!silent) setToast(error instanceof Error ? error.message : "Follow-up service notice.");
+    }
+  }
+
+  async function submitTicketReply(ticketId: string, recipientName: string) {
+    if (!replyMessageText.trim()) return;
+    setSendingReply(true);
+    try {
+      const res = await fetch("/api/follow-up/inbox", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticketId, message: replyMessageText.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to dispatch reply.");
+      setToast(`Reply successfully sent to ${recipientName} via Freshdesk!`);
+      setReplyMessageText("");
+      setActiveReplyTicketId(null);
+      void loadFollowupUpdates(true);
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : "Error dispatching reply.");
+    } finally {
+      setSendingReply(false);
     }
   }
 
@@ -1042,7 +1116,7 @@ export default function Home() {
             onClick={() => setTab("followups")}
           >
             <IconInbox size={13} />
-            <span>Follow-ups</span>
+            <span>Messages & Inbox</span>
             <span className="nav-count-badge">{followupUpdates.length}</span>
           </button>
           <button
@@ -1110,7 +1184,7 @@ export default function Home() {
             <div className="kpi-metric-box">
               <div className="kpi-label">
                 <IconInbox size={12} />
-                <span>Follow-ups</span>
+                <span>Care Inbox</span>
               </div>
               <div className="kpi-number">{followupUpdates.length}</div>
             </div>
@@ -1951,69 +2025,330 @@ export default function Home() {
           </div>
         )}
 
-        {/* TAB 4: FOLLOW-UPS & CARE INBOX */}
+        {/* TAB 4: CARE COMMUNICATIONS & MESSAGES INBOX */}
         {tab === "followups" && (
-          <div className="card-panel" style={{ maxWidth: "1000px", margin: "0 auto" }}>
+          <div className="card-panel" style={{ maxWidth: "1050px", margin: "0 auto" }}>
             <div className="panel-header-line">
               <h2 className="panel-title">
-                <span>Care Continuity & Follow-up Log</span>
-                <span className="nav-count-badge">{followupUpdates.length}</span>
+                <span>Care Communications & Messages Inbox</span>
+                <span className="nav-count-badge">{filteredFollowupUpdates.length}</span>
               </h2>
               <button className="btn-secondary" onClick={() => void loadFollowupUpdates()}>
                 <IconRefresh size={12} />
-                <span>Refresh Log</span>
+                <span>Refresh Messages</span>
               </button>
             </div>
             <div className="panel-subtitle">
-              Post-discharge patient health feedback, status check-ins, and clinical condition notices.
+              Centralized reception desk communications. Synchronizes patient responses, physician updates, and Freshdesk email conversation threads.
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {followupUpdates.map(u => (
-                <article
-                  key={u.id}
-                  style={{
-                    border: "1px solid",
-                    borderColor: u.priority === 4 ? "var(--rose-line)" : "var(--line-200)",
-                    backgroundColor: u.priority === 4 ? "var(--rose-50)" : "#ffffff",
-                    borderRadius: "8px",
-                    padding: "14px 16px",
-                  }}
+            {/* Receptionist Automatic Notification Callout */}
+            <div
+              style={{
+                backgroundColor: "var(--primary-50)",
+                border: "1px solid var(--primary-line)",
+                borderRadius: "8px",
+                padding: "12px 16px",
+                margin: "12px 0 16px 0",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "10px",
+                fontSize: "12.5px",
+                color: "var(--primary-700)",
+                lineHeight: "1.5",
+              }}
+            >
+              <div style={{ flexShrink: 0, marginTop: "2px" }}>
+                <IconInbox size={15} />
+              </div>
+              <div>
+                <strong>Receptionist Direct Notification Active:</strong> All consultation notices and follow-ups are assigned to Receptionist Agent <em>vrushali p</em> (<code>shreyas.kulkunda@bixbytessolutions.com</code>). When any patient or doctor replies, Freshdesk automatically emails the receptionist immediately and pulls their response into this care thread. You can review dialogue and respond directly below.
+              </div>
+            </div>
+
+            {/* Inbox Search & Filter Toolbar */}
+            <div
+              style={{
+                display: "flex",
+                gap: "10px",
+                marginBottom: "16px",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ position: "relative", flex: "1 1 320px", maxWidth: "450px" }}>
+                <input
+                  type="text"
+                  placeholder="Search by patient, physician, email, ticket ID, or message..."
+                  value={inboxSearch}
+                  onChange={e => setInboxSearch(e.target.value)}
+                  style={{ paddingLeft: "32px", fontSize: "13px" }}
+                />
+                <div style={{ position: "absolute", left: "10px", top: "50%", transform: "translateY(-50%)", color: "var(--ink-400)", pointerEvents: "none" }}>
+                  <IconSearch size={13} />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className={inboxFilter === "all" ? "action-sub-btn is-active" : "action-sub-btn"}
+                  style={{ fontWeight: inboxFilter === "all" ? 700 : 500, backgroundColor: inboxFilter === "all" ? "var(--ink-900)" : "#ffffff", color: inboxFilter === "all" ? "#ffffff" : "var(--ink-700)" }}
+                  onClick={() => setInboxFilter("all")}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px", flexWrap: "wrap" }}>
-                    <div>
-                      <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--ink-900)" }}>{u.name}</span>
-                      <span style={{ fontSize: "12px", color: "var(--ink-500)", marginLeft: "8px" }}>
-                        {u.email} · Ticket #{u.id}
-                      </span>
+                  All ({followupUpdates.length})
+                </button>
+                <button
+                  type="button"
+                  className={inboxFilter === "replies" ? "action-sub-btn is-active" : "action-sub-btn"}
+                  style={{ fontWeight: inboxFilter === "replies" ? 700 : 500, backgroundColor: inboxFilter === "replies" ? "var(--primary-600)" : "#ffffff", color: inboxFilter === "replies" ? "#ffffff" : "var(--ink-700)" }}
+                  onClick={() => setInboxFilter("replies")}
+                >
+                  With Replies ({followupUpdates.filter(u => u.conversations && u.conversations.length > 0).length})
+                </button>
+                <button
+                  type="button"
+                  className={inboxFilter === "urgent" ? "action-sub-btn is-active" : "action-sub-btn"}
+                  style={{ fontWeight: inboxFilter === "urgent" ? 700 : 500, backgroundColor: inboxFilter === "urgent" ? "var(--rose-600)" : "#ffffff", color: inboxFilter === "urgent" ? "#ffffff" : "var(--ink-700)" }}
+                  onClick={() => setInboxFilter("urgent")}
+                >
+                  Urgent / Clinical ({followupUpdates.filter(u => u.priority === 4).length})
+                </button>
+              </div>
+            </div>
+
+            {/* Conversation Threads List */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              {filteredFollowupUpdates.map(u => {
+                const hasConversations = Boolean(u.conversations && u.conversations.length > 0);
+                const isReplying = activeReplyTicketId === u.id;
+
+                return (
+                  <article
+                    key={u.id}
+                    style={{
+                      border: "1px solid",
+                      borderColor: u.priority === 4 ? "var(--rose-line)" : hasConversations ? "var(--primary-line)" : "var(--line-200)",
+                      backgroundColor: u.priority === 4 ? "var(--rose-50)" : "#ffffff",
+                      borderRadius: "10px",
+                      padding: "16px 18px",
+                      boxShadow: "var(--shadow-xs)",
+                      transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+                    }}
+                  >
+                    {/* Header Row */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "10px", flexWrap: "wrap", marginBottom: "8px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <div
+                          style={{
+                            width: "34px",
+                            height: "34px",
+                            borderRadius: "50%",
+                            backgroundColor: u.priority === 4 ? "var(--rose-600)" : hasConversations ? "var(--primary-600)" : "var(--ink-700)",
+                            color: "#ffffff",
+                            display: "grid",
+                            placeItems: "center",
+                            fontWeight: 700,
+                            fontSize: "13px",
+                            flexShrink: 0,
+                          }}
+                        >
+                          {(u.name || "P").slice(0, 1).toUpperCase()}
+                        </div>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ fontSize: "14.5px", fontWeight: 700, color: "var(--ink-900)" }}>{u.name}</span>
+                            <span style={{ fontSize: "11px", color: "var(--ink-500)", background: "var(--surface-subtle)", padding: "2px 6px", borderRadius: "4px" }}>
+                              Ticket #{u.id}
+                            </span>
+                            {hasConversations && (
+                              <span
+                                style={{
+                                  fontSize: "11px",
+                                  fontWeight: 600,
+                                  color: "var(--primary-700)",
+                                  backgroundColor: "var(--primary-50)",
+                                  border: "1px solid var(--primary-line)",
+                                  padding: "2px 7px",
+                                  borderRadius: "12px",
+                                }}
+                              >
+                                💬 {u.conversations!.length} {u.conversations!.length === 1 ? "Conversation" : "Conversations"}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: "12px", color: "var(--ink-500)", marginTop: "2px" }}>
+                            {u.email}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right Badges */}
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "11px", color: "var(--ink-500)", background: "#ffffff", border: "1px solid var(--line-200)", padding: "2px 8px", borderRadius: "4px" }}>
+                          Assigned: Receptionist
+                        </span>
+                        {u.priority === 4 ? (
+                          <span className="clinical-badge cancelled">
+                            Requires Immediate Attention
+                          </span>
+                        ) : (
+                          <span className="clinical-badge completed" style={{ fontSize: "11px" }}>
+                            {u.status === 4 ? "Resolved" : u.status === 3 ? "Pending" : "Active"}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    {u.priority === 4 && (
-                      <span className="clinical-badge cancelled">
-                        Requires Prompt Clinical Review
-                      </span>
-                    )}
-                  </div>
 
-                  <p style={{ margin: "8px 0", fontSize: "13px", color: "var(--ink-700)", whiteSpace: "pre-wrap" }}>
-                    {u.message || u.subject}
-                  </p>
+                    {/* Subject */}
+                    <div style={{ fontSize: "13.5px", fontWeight: 600, color: "var(--ink-900)", margin: "6px 0 8px 0" }}>
+                      {u.subject}
+                    </div>
 
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--ink-500)", paddingTop: "6px", borderTop: "1px solid rgba(0,0,0,0.06)" }}>
-                    <span>Recorded: {u.createdAt ? new Date(u.createdAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "Recent"}</span>
-                    <button
-                      className="action-sub-btn"
-                      onClick={() => setToast(`Clinical review logged for ${u.name}.`)}
+                    {/* Initial Ticket Content */}
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        color: "var(--ink-700)",
+                        lineHeight: "1.55",
+                        backgroundColor: "#f8fafc",
+                        border: "1px solid var(--line-100)",
+                        borderRadius: "6px",
+                        padding: "10px 12px",
+                        marginBottom: "12px",
+                        whiteSpace: "pre-wrap",
+                      }}
                     >
-                      Acknowledge Review
-                    </button>
-                  </div>
-                </article>
-              ))}
+                      {u.message}
+                    </div>
 
-              {!followupUpdates.length && (
-                <div style={{ padding: "40px 16px", textAlign: "center", color: "var(--ink-500)" }}>
-                  <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--ink-900)" }}>No follow-up entries pending</div>
-                  <div style={{ fontSize: "12px", marginTop: "2px" }}>Patient feedback after completion will display here.</div>
+                    {/* Conversation History (Replies from Patient, Doctor, or Receptionist) */}
+                    {hasConversations && (
+                      <div style={{ marginTop: "12px", marginBottom: "14px" }}>
+                        <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--ink-700)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "8px" }}>
+                          Conversation Dialogue & Replies ({u.conversations!.length})
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          {u.conversations!.map(c => (
+                            <div
+                              key={c.id}
+                              style={{
+                                borderRadius: "8px",
+                                padding: "10px 14px",
+                                border: "1px solid",
+                                borderColor: c.incoming ? "var(--emerald-line)" : "var(--line-200)",
+                                backgroundColor: c.incoming ? "var(--emerald-50)" : "#ffffff",
+                                alignSelf: c.incoming ? "flex-start" : "flex-end",
+                                maxWidth: "90%",
+                              }}
+                            >
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "4px" }}>
+                                <span style={{ fontSize: "12px", fontWeight: 700, color: c.incoming ? "var(--emerald-600)" : "var(--ink-700)" }}>
+                                  {c.incoming ? `📩 Reply from ${c.from}` : `📤 ${c.from}`}
+                                </span>
+                                <span style={{ fontSize: "11px", color: "var(--ink-400)" }}>
+                                  {c.createdAt ? new Date(c.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Recent"}
+                                </span>
+                              </div>
+                              <p style={{ margin: 0, fontSize: "13px", color: "var(--ink-900)", lineHeight: "1.5", whiteSpace: "pre-wrap" }}>
+                                {c.message}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Inline Reply Composer (when open) */}
+                    {isReplying && (
+                      <div
+                        style={{
+                          marginTop: "12px",
+                          padding: "14px",
+                          backgroundColor: "var(--surface-subtle)",
+                          border: "1px solid var(--primary-line)",
+                          borderRadius: "8px",
+                        }}
+                      >
+                        <div style={{ fontSize: "12.5px", fontWeight: 700, color: "var(--ink-900)", marginBottom: "6px" }}>
+                          Reply to {u.name} ({u.email}):
+                        </div>
+                        <textarea
+                          rows={3}
+                          placeholder={`Write a reply to ${u.name}... This message will be delivered directly to their inbox via Freshdesk.`}
+                          value={replyMessageText}
+                          onChange={e => setReplyMessageText(e.target.value)}
+                          style={{ resize: "vertical", marginBottom: "10px" }}
+                          autoFocus
+                        />
+                        <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            onClick={() => {
+                              setActiveReplyTicketId(null);
+                              setReplyMessageText("");
+                            }}
+                            disabled={sendingReply}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={sendingReply || !replyMessageText.trim()}
+                            onClick={() => void submitTicketReply(u.id, u.name)}
+                          >
+                            <IconSend size={12} />
+                            <span>{sendingReply ? "Transmitting..." : "Send Reply via Freshdesk"}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Footer Row */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "var(--ink-500)", paddingTop: "8px", borderTop: "1px solid rgba(0,0,0,0.06)", flexWrap: "wrap", gap: "8px" }}>
+                      <span>
+                        Received: {u.createdAt ? new Date(u.createdAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "Recent"}
+                      </span>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <button
+                          className="action-sub-btn"
+                          style={{ backgroundColor: isReplying ? "var(--ink-200)" : undefined }}
+                          onClick={() => {
+                            if (isReplying) {
+                              setActiveReplyTicketId(null);
+                              setReplyMessageText("");
+                            } else {
+                              setActiveReplyTicketId(u.id);
+                              setReplyMessageText("");
+                            }
+                          }}
+                        >
+                          {isReplying ? "Close Reply Box" : "Reply to Message"}
+                        </button>
+                        <button
+                          className="action-sub-btn"
+                          onClick={() => setToast(`Clinical review recorded for ticket #${u.id}.`)}
+                        >
+                          Acknowledge
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+
+              {!filteredFollowupUpdates.length && (
+                <div style={{ padding: "40px 16px", textAlign: "center", color: "var(--ink-500)", border: "1px dashed var(--line-200)", borderRadius: "8px" }}>
+                  <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--ink-900)" }}>No communications found</div>
+                  <div style={{ fontSize: "12px", marginTop: "4px" }}>
+                    {inboxSearch || inboxFilter !== "all"
+                      ? "No items match your filter criteria. Try clearing search filters."
+                      : "Incoming patient and physician email replies will automatically appear here."}
+                  </div>
                 </div>
               )}
             </div>
