@@ -1511,8 +1511,14 @@ export default function Home() {
                               className="action-sub-btn"
                               onClick={() => {
                                 setSendingMessageFor(r.id);
-                                void sendAppointmentEmail(r).then(() => {
-                                  setToast(`Appointment notice transmitted to ${r.fields[COL.name]}.`);
+                                void sendAppointmentEmail(r).then((res) => {
+                                  const doc = r.fields[COL.doctor];
+                                  const patient = r.fields[COL.name];
+                                  if (res?.ok && doc) {
+                                    setToast(`Appointment notice transmitted to ${patient} and ${doc}.`);
+                                  } else {
+                                    setToast(`Appointment notice transmitted to ${patient}.`);
+                                  }
                                 }).finally(() => setSendingMessageFor(null));
                               }}
                               disabled={sendingMessageFor === r.id}

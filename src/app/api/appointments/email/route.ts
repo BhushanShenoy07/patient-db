@@ -265,13 +265,11 @@ export async function POST(request: Request) {
       `;
     }
 
-    // 7. Dispatch through Freshdesk (with doctor CC)
-    const ccEmails = doctorEmail && doctorEmail.toLowerCase() !== email.toLowerCase() ? [doctorEmail] : [];
-
-    const ticket = await createFollowupTicket({
+    // 7. Dispatch Patient Notification Ticket (Freshdesk emails Patient as Requester)
+    const patientTicket = await createFollowupTicket({
       email,
       name,
-      ccEmails,
+      ccEmails: [],
       subject: emailSubject,
       description: emailHtml,
       priority: 2,
@@ -279,17 +277,128 @@ export async function POST(request: Request) {
         isCancelled ? "clinic_appointment_cancelled" : "clinic_appointment",
         mode.toLowerCase(),
         `appointment_${appointmentId}`,
+        "patient_notification",
       ],
     });
 
+    // 8. Dispatch Doctor Notification Ticket (Freshdesk emails Doctor directly as Requester)
+    let doctorTicket: any = null;
+    if (doctorEmail && doctorEmail.toLowerCase() !== email.toLowerCase()) {
+      try {
+        const doctorSubject = isCancelled
+          ? `Clinic Desk · Consultation Cancelled · Patient: ${name} · ${date}`
+          : `Clinic Desk · New Consultation Scheduled · Patient: ${name} (${mode}) · ${date} at ${time}`;
+
+        const doctorEmailHtml = isCancelled
+          ? `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+              <div style="background: linear-gradient(135deg, #475569 0%, #334155 100%); padding: 24px; color: #ffffff; text-align: center;">
+                <h1 style="margin: 0 0 6px 0; font-size: 22px; font-weight: 700;">Clinic Desk Healthcare</h1>
+                <p style="margin: 0; font-size: 14px; opacity: 0.9;">Physician Notice: Consultation Cancelled</p>
+              </div>
+              <div style="padding: 24px;">
+                <p style="font-size: 16px; margin: 0 0 16px 0;">Dear <strong>${safeDoctor}</strong>,</p>
+                <p style="font-size: 15px; line-height: 1.6; color: #334155; margin: 0 0 20px 0;">
+                  This is to notify you that the consultation with patient <strong>${safeName}</strong> scheduled for <strong>${safeDate} at ${safeTime}</strong> has been cancelled. Your schedule slot has been updated and released.
+                </p>
+                <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 0 0 20px 0; font-size: 14px;">
+                  <p style="margin: 0 0 6px 0; color: #64748b;"><strong>Patient:</strong> ${safeName}</p>
+                  <p style="margin: 0 0 6px 0; color: #64748b;"><strong>Patient Email:</strong> ${email}</p>
+                  ${phone ? `<p style="margin: 0 0 6px 0; color: #64748b;"><strong>Phone:</strong> ${escapeHtml(phone)}</p>` : ""}
+                  <p style="margin: 0; color: #64748b;"><strong>Cancelled Slot:</strong> ${safeDate} at ${safeTime}</p>
+                </div>
+                <p style="font-size: 14px; line-height: 1.5; color: #334155; margin: 0;">
+                  Best regards,<br/>
+                  <strong>Clinic Desk Scheduling System</strong>
+                </p>
+              </div>
+            </div>
+          `
+          : `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+              <div style="background: linear-gradient(135deg, #0d9488 0%, #0891b2 100%); padding: 24px; color: #ffffff; text-align: center;">
+                <h1 style="margin: 0 0 6px 0; font-size: 22px; font-weight: 700;">Clinic Desk Healthcare</h1>
+                <p style="margin: 0; font-size: 14px; opacity: 0.95;">Physician Schedule Notification</p>
+              </div>
+              <div style="padding: 24px;">
+                <p style="font-size: 16px; margin: 0 0 16px 0;">Dear <strong>${safeDoctor}</strong>,</p>
+                <p style="font-size: 15px; line-height: 1.6; color: #334155; margin: 0 0 20px 0;">
+                  A clinical consultation has been scheduled with you for patient <strong>${safeName}</strong>.
+                </p>
+                <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin: 0 0 20px 0; font-size: 14px;">
+                  <h3 style="margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; font-weight: 700;">Consultation Details</h3>
+                  <table style="width: 100%; border-collapse: collapse;">
+                    <tr><td style="padding: 5px 0; color: #64748b; width: 140px;">Patient Name:</td><td style="padding: 5px 0; font-weight: 600; color: #0f172a;">${safeName}</td></tr>
+                    <tr><td style="padding: 5px 0; color: #64748b;">Patient Email:</td><td style="padding: 5px 0; color: #0284c7;">${email}</td></tr>
+                    ${phone ? `<tr><td style="padding: 5px 0; color: #64748b;">Contact Phone:</td><td style="padding: 5px 0; color: #0f172a;">${escapeHtml(phone)}</td></tr>` : ""}
+                    ${bloodGroup ? `<tr><td style="padding: 5px 0; color: #64748b;">Blood Group:</td><td style="padding: 5px 0; color: #0f172a;">${escapeHtml(bloodGroup)}</td></tr>` : ""}
+                    <tr><td style="padding: 5px 0; color: #64748b;">Date & Time:</td><td style="padding: 5px 0; font-weight: 600; color: #0f172a;">${safeDate} at ${safeTime}</td></tr>
+                    <tr><td style="padding: 5px 0; color: #64748b;">Consultation Mode:</td><td style="padding: 5px 0; font-weight: 600; color: ${isOnline ? "#0284c7" : "#059669"};">${isOnline ? "Online Telehealth Consultation" : "In-Person Clinic Visit"}</td></tr>
+                    ${notes ? `<tr><td style="padding: 5px 0; color: #64748b; vertical-align: top;">Clinical Notes:</td><td style="padding: 5px 0; color: #334155;">${escapeHtml(notes)}</td></tr>` : ""}
+                  </table>
+                </div>
+
+                ${isOnline ? `
+                  <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 5px solid #16a34a; border-radius: 8px; padding: 18px; margin: 0 0 20px 0;">
+                    <h3 style="margin: 0 0 10px 0; font-size: 15px; color: #166534; font-weight: 700;">Host Video Consultation Link (Zoom)</h3>
+                    <p style="margin: 0 0 12px 0; font-size: 14px; color: #14532d;">
+                      Please click the button below to launch the video meeting at the scheduled time:
+                    </p>
+                    <div style="text-align: center; margin: 14px 0;">
+                      <a href="${escapeHtml(zoomUrl || `https://zoom.us/j/${zoomId}?pwd=CLINIC`)}" style="background-color: #16a34a; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 600; font-size: 14px; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" target="_blank">
+                        Start Video Consultation (Host)
+                      </a>
+                    </div>
+                    <div style="margin: 8px 0 0 0; font-size: 13px; color: #15803d; text-align: center;">
+                      ${zoomUrl ? `<strong>Direct Link:</strong> <a href="${escapeHtml(zoomUrl)}" style="color: #0369a1; word-break: break-all;">${escapeHtml(zoomUrl)}</a><br/>` : ""}
+                      ${zoomId ? `<strong>Meeting ID:</strong> ${escapeHtml(zoomId)}` : ""}
+                    </div>
+                  </div>
+                ` : `
+                  <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 5px solid #0284c7; border-radius: 8px; padding: 16px; margin: 0 0 20px 0;">
+                    <h3 style="margin: 0 0 6px 0; font-size: 15px; color: #0369a1; font-weight: 700;">In-Person Clinic Consultation</h3>
+                    <p style="margin: 0; font-size: 13px; color: #334155;">
+                      Location: ${escapeHtml(clinicAddress)}. Patient has been instructed to arrive 10-15 minutes prior for vitals and check-in.
+                    </p>
+                  </div>
+                `}
+
+                <p style="font-size: 14px; line-height: 1.5; color: #334155; margin: 0;">
+                  Warm regards,<br/>
+                  <strong>Clinic Desk Scheduling System</strong>
+                </p>
+              </div>
+            </div>
+          `;
+
+        doctorTicket = await createFollowupTicket({
+          email: doctorEmail,
+          name: doctor,
+          ccEmails: [],
+          subject: doctorSubject,
+          description: doctorEmailHtml,
+          priority: 2,
+          tags: [
+            isCancelled ? "clinic_appointment_cancelled" : "clinic_appointment",
+            mode.toLowerCase(),
+            `appointment_${appointmentId}`,
+            "doctor_notification",
+          ],
+        });
+      } catch (docErr) {
+        console.warn("Could not dispatch doctor notification ticket:", docErr);
+      }
+    }
+
     return NextResponse.json({
       ok: true,
-      ticketId: ticket.id,
+      patientTicketId: patientTicket.id,
+      doctorTicketId: doctorTicket?.id || null,
       patientEmail: email,
       doctorEmail,
       mode,
       hasZoom: isOnline && Boolean(zoomUrl || zoomId),
-      freshserviceTicketId: (ticket as any).freshserviceTicketId,
+      freshserviceTicketId: (patientTicket as any).freshserviceTicketId,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not dispatch appointment email.";
