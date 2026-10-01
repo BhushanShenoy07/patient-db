@@ -9,13 +9,14 @@ export async function GET(request: Request) {
   if (!session) return NextResponse.json({ error: "Sign in to view clinic records." }, { status: 401 });
   try {
     const records = await listAirtableRecords();
+    const normalize = (s?: string) => String(s || "").toLowerCase().replace(/^dr\.?\s*/, "").trim();
     return NextResponse.json({
       records: session.role === "doctor"
         ? records.filter((record: any) => {
-            const doc = String(record.fields?.Doctor || "").toLowerCase();
-            const myDoc = session.doctorName?.toLowerCase() || "";
-            const isReg = String(record.fields?.Status || "").toLowerCase() === "registered" || !record.fields?.["Appointment Date"];
-            return doc === myDoc || isReg;
+            const doc = normalize(record.fields?.Doctor);
+            const myDoc = normalize(session.doctorName);
+            if (!doc || !myDoc) return false;
+            return doc === myDoc || doc.includes(myDoc) || myDoc.includes(doc);
           })
         : records,
     });

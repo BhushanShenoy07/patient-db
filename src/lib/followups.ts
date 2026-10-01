@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 const key = () => {
   const secret = process.env.CLINIC_SESSION_SECRET?.trim();
@@ -142,6 +144,10 @@ export async function freshdeskRequest(path: string, init: RequestInit = {}) {
   const text = await response.text();
   let body: any = {};
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
+  if (response.status === 429) {
+    const retryAfter = response.headers.get("retry-after") || "60";
+    throw new Error(`Freshdesk rate limit reached (HTTP 429). Retry after ${retryAfter}s.`);
+  }
   if (response.status === 401) {
     throw new Error("Freshdesk rejected the API key. Set FRESHDESK_API_KEY to an active agent API key from the profile for the configured Freshdesk account.");
   }
@@ -278,13 +284,40 @@ export async function createFollowupTicket(input: {
   return { id: newTicket.id, simulated: true };
 }
 
-let ticketsCache: any[] = [];
-let ticketsCacheTime = 0;
-const TICKETS_CACHE_TTL = 20_000; // 20s cache window to protect Freshdesk 50 req/min limit
-const conversationCache = new Map<string, { updatedAt: string; conversations: any[] }>();
+// Declare global cache on globalThis to survive Next.js dev reloads and route worker splits
+declare global {
+  var __clinicTicketsCache: any[] | undefined;
+  var __clinicTicketsCacheTime: number | undefined;
+  var __clinicConversationCache: Map<string, { updatedAt: string; conversations: any[] }> | undefined;
+}
+
+const TICKETS_CACHE_TTL = 30_000; // 30s cache window to comfortably stay under Freshdesk 50 req/min limit
+const DISK_CACHE_PATH = path.join(process.cwd(), ".cache", "clinic_tickets.json");
+
+function getTicketsFromDisk(): any[] {
+  try {
+    if (fs.existsSync(DISK_CACHE_PATH)) {
+      const raw = fs.readFileSync(DISK_CACHE_PATH, "utf8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+function saveTicketsToDisk(tickets: any[]) {
+  try {
+    const dir = path.dirname(DISK_CACHE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DISK_CACHE_PATH, JSON.stringify(tickets), "utf8");
+    console.log(`[Cache] Successfully saved ${tickets.length} tickets to disk cache.`);
+  } catch (err) {
+    console.warn("[Cache] Notice writing disk cache:", err);
+  }
+}
 
 export function invalidateTicketsCache() {
-  ticketsCacheTime = 0;
+  globalThis.__clinicTicketsCacheTime = 0;
 }
 
 export async function getClinicTicketsWithConversations(limit = 30) {
@@ -301,59 +334,65 @@ export async function getClinicTicketsWithConversations(limit = 30) {
       updatedAt: t.created_at,
       responderId: 1130009360826,
       tags: t.tags,
+      hasReplies: false,
       conversations: [],
     }));
   }
 
-  const logDebug = (msg: string) => {
-    try {
-      const fs = require("fs");
-      const path = require("path");
-      fs.appendFileSync("scratch/debug_server.log", `[${new Date().toISOString()}] ${msg}\n`);
-    } catch {}
-  };
+  if (!globalThis.__clinicConversationCache) {
+    globalThis.__clinicConversationCache = new Map();
+  }
+  const conversationCache = globalThis.__clinicConversationCache;
 
-  logDebug(`Called getClinicTicketsWithConversations. Cached: ${ticketsCache.length}, CacheAge: ${Date.now() - ticketsCacheTime}ms`);
+  if (!globalThis.__clinicTicketsCache || globalThis.__clinicTicketsCache.length === 0) {
+    globalThis.__clinicTicketsCache = getTicketsFromDisk();
+    if (globalThis.__clinicTicketsCache.length > 0) {
+      globalThis.__clinicTicketsCacheTime = Date.now() - 15_000;
+    }
+  }
 
   const now = Date.now();
-  if (ticketsCache.length > 0 && now - ticketsCacheTime < TICKETS_CACHE_TTL) {
-    logDebug(`Serving from memory cache: ${ticketsCache.length} items`);
-    return ticketsCache;
+  const cacheAge = now - (globalThis.__clinicTicketsCacheTime || 0);
+  if (globalThis.__clinicTicketsCache && globalThis.__clinicTicketsCache.length > 0 && cacheAge < TICKETS_CACHE_TTL) {
+    return globalThis.__clinicTicketsCache;
   }
 
   try {
     let tickets: any = null;
     try {
-      tickets = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=${limit}&include=requester`);
-      logDebug(`Freshdesk API returned: isArray=${Array.isArray(tickets)}, length=${Array.isArray(tickets) ? tickets.length : typeof tickets}`);
+      tickets = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=${limit}&include=requester,stats`);
     } catch (reqErr: any) {
-      logDebug(`Freshdesk API threw error: ${reqErr?.message || reqErr}`);
-      if (reqErr?.message?.includes("429") || String(reqErr).includes("429")) {
-        if (ticketsCache.length > 0) {
-          logDebug(`429 caught; serving cached: ${ticketsCache.length}`);
-          return ticketsCache;
-        }
+      console.warn("Freshdesk fetch error:", reqErr?.message || reqErr);
+      if (globalThis.__clinicTicketsCache && globalThis.__clinicTicketsCache.length > 0) {
+        return globalThis.__clinicTicketsCache;
+      }
+      const diskFallback = getTicketsFromDisk();
+      if (diskFallback.length > 0) {
+        globalThis.__clinicTicketsCache = diskFallback;
+        return diskFallback;
       }
       throw reqErr;
     }
 
     if (!Array.isArray(tickets)) {
-      if (ticketsCache.length > 0) return ticketsCache;
-      return [];
+      if (globalThis.__clinicTicketsCache && globalThis.__clinicTicketsCache.length > 0) {
+        return globalThis.__clinicTicketsCache;
+      }
+      return getTicketsFromDisk();
     }
 
-    let convCalls = 0;
     const enriched = await Promise.all(
       tickets.map(async (t: any) => {
         let conversations: any[] = [];
-        const hasUpdates = t.created_at !== t.updated_at;
+        const hasRealReplies = Boolean(
+          t.stats && (t.stats.agent_responded_at || t.stats.requester_responded_at || t.stats.first_responded_at)
+        );
 
-        if (hasUpdates) {
+        if (hasRealReplies) {
           const cached = conversationCache.get(String(t.id));
           if (cached && cached.updatedAt === t.updated_at) {
             conversations = cached.conversations;
-          } else if (convCalls < 5) {
-            convCalls++;
+          } else {
             try {
               const convRes = await freshdeskRequest(`/tickets/${t.id}/conversations`);
               if (Array.isArray(convRes)) {
@@ -365,7 +404,9 @@ export async function getClinicTicketsWithConversations(limit = 30) {
                   createdAt: c.created_at,
                 }));
               }
-            } catch { /* ignore individual conversation fetch */ }
+            } catch (convErr) {
+              console.warn(`Could not load conversations for ticket #${t.id}:`, convErr instanceof Error ? convErr.message : convErr);
+            }
             conversationCache.set(String(t.id), { updatedAt: t.updated_at, conversations });
           }
         }
@@ -390,18 +431,41 @@ export async function getClinicTicketsWithConversations(limit = 30) {
           updatedAt: t.updated_at,
           responderId: t.responder_id,
           tags: Array.isArray(t.tags) ? t.tags : [],
+          hasReplies: hasRealReplies || conversations.length > 0,
           conversations,
         };
       })
     );
 
-    ticketsCache = enriched;
-    ticketsCacheTime = Date.now();
+    globalThis.__clinicTicketsCache = enriched;
+    globalThis.__clinicTicketsCacheTime = Date.now();
+    saveTicketsToDisk(enriched);
     return enriched;
   } catch (err) {
     console.warn("Could not load Freshdesk tickets:", err);
-    if (ticketsCache.length > 0) return ticketsCache;
-    return [];
+    if (globalThis.__clinicTicketsCache && globalThis.__clinicTicketsCache.length > 0) {
+      return globalThis.__clinicTicketsCache;
+    }
+    const disk = getTicketsFromDisk();
+    if (disk.length > 0) {
+      globalThis.__clinicTicketsCache = disk;
+      return disk;
+    }
+    return localTickets.map(t => ({
+      id: String(t.id),
+      subject: t.subject,
+      email: t.email,
+      name: t.name,
+      status: 2,
+      priority: t.priority,
+      message: t.description_text || t.description,
+      createdAt: t.created_at,
+      updatedAt: t.created_at,
+      responderId: 1130009360826,
+      tags: t.tags,
+      hasReplies: false,
+      conversations: [],
+    }));
   }
 }
 

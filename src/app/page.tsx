@@ -25,6 +25,7 @@ type FollowupUpdate = {
   status?: number;
   updatedAt?: string;
   tags?: string[];
+  hasReplies?: boolean;
   conversations?: FollowupConversation[];
 };
 type DoctorOption = { name: string; specialization: string; email: string };
@@ -269,42 +270,57 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
     <main className="auth-container-shell">
       <form className="auth-panel-card" onSubmit={submit}>
         <div className="auth-brand-row">
-          <div className="brand-icon-box">
+          <div className="brand-icon-box" style={{ background: "linear-gradient(135deg, #003b71 0%, #004b87 100%)" }}>
             <IconCross size={18} />
           </div>
           <div>
-            <div className="brand-title">Clinic Desk</div>
-            <div className="brand-subtitle">Clinical Information Management System</div>
+            <div className="brand-title" style={{ color: "#003b71", fontSize: "17px", fontWeight: 800 }}>KMC Hospital</div>
+            <div className="brand-subtitle">Kasturba Medical College · Manipal Health Desk</div>
           </div>
         </div>
 
         <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--primary-600)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-          Authentication
+          Staff Clinical Portal Access
         </div>
         <h1 style={{ margin: "2px 0 4px", fontSize: "20px", fontWeight: 700, color: "var(--ink-900)" }}>
           Sign in to Clinical Portal
         </h1>
         <p style={{ margin: "0 0 14px", color: "var(--ink-500)", fontSize: "12.5px" }}>
-          Select your staff role and authenticate with your clinic account.
+          Sign in as Attending Physician or Front Desk Receptionist.
         </p>
 
         {/* 1-Click Fast Demonstration Logins */}
         <div className="test-accounts-section">
-          <div className="test-accounts-title">Quick Demo Staff Accounts</div>
+          <div className="test-accounts-title">Quick Demo Staff Accounts (1-Click)</div>
           <div className="test-role-buttons">
+            <button
+              type="button"
+              className="btn-test-account"
+              disabled={busy}
+              style={{ borderColor: "var(--primary-line)", backgroundColor: "var(--primary-50)" }}
+              onClick={() => {
+                setRole("doctor");
+                setEmail("bhushanshenoy07@gmail.com");
+                setPassword("bhushan@123");
+                void handleLogin("bhushanshenoy07@gmail.com", "bhushan@123", "doctor");
+              }}
+            >
+              <strong style={{ color: "var(--primary-700)" }}>Dr. Bhushan Shenoy (Doctor)</strong>
+              <small>Only His Consultations &amp; Messages</small>
+            </button>
             <button
               type="button"
               className="btn-test-account"
               disabled={busy}
               onClick={() => {
                 setRole("receptionist");
-                setEmail("reception@clinic.com");
-                setPassword("reception123");
-                void handleLogin("reception@clinic.com", "reception123", "receptionist");
+                setEmail("vrushali@gmail.com");
+                setPassword("vrushali@123");
+                void handleLogin("vrushali@gmail.com", "vrushali@123", "receptionist");
               }}
             >
-              <span>Front Desk Staff</span>
-              <small>reception@clinic.com</small>
+              <strong>Vrushali (Reception Desk)</strong>
+              <small>Full Clinic Portal Access</small>
             </button>
             <button
               type="button"
@@ -318,35 +334,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
               }}
             >
               <span>Dr. Ananya Rao</span>
-              <small>General Medicine</small>
-            </button>
-            <button
-              type="button"
-              className="btn-test-account"
-              disabled={busy}
-              onClick={() => {
-                setRole("doctor");
-                setEmail("arjun@clinic.com");
-                setPassword("doctor123");
-                void handleLogin("arjun@clinic.com", "doctor123", "doctor");
-              }}
-            >
-              <span>Dr. Arjun Mehta</span>
-              <small>Cardiology</small>
-            </button>
-            <button
-              type="button"
-              className="btn-test-account"
-              disabled={busy}
-              onClick={() => {
-                setRole("doctor");
-                setEmail("bhushan@clinic.com");
-                setPassword("doctor123");
-                void handleLogin("bhushan@clinic.com", "doctor123", "doctor");
-              }}
-            >
-              <span>Dr. Bhushan Shenoy</span>
-              <small>Clinic Doctor</small>
+              <small>General Medicine (Doctor)</small>
             </button>
           </div>
         </div>
@@ -497,6 +485,32 @@ export default function Home() {
     return () => clearInterval(id);
   }, [user]);
 
+  useEffect(() => {
+    if (user?.role === "doctor" && tab !== "appointments" && tab !== "followups") {
+      setTab("appointments");
+    }
+  }, [user, tab]);
+
+  useEffect(() => {
+    if (user?.role === "doctor" && user.doctorName) {
+      setAppt(old => ({ ...old, doctor: user.doctorName || "" }));
+    }
+  }, [user]);
+
+  async function completeConsultation(record: RecordItem) {
+    try {
+      const updatedFields: Fields = {
+        ...record.fields,
+        [COL.status]: "Completed",
+      };
+      await saveRecord(record.id, updatedFields);
+      setRecords(old => old.map(r => r.id === record.id ? { ...r, fields: updatedFields } : r));
+      setToast(`Consultation marked as Completed for ${record.fields[COL.name]}. Care continuity enabled.`);
+    } catch (err) {
+      setToast(err instanceof Error ? err.message : "Error completing consultation.");
+    }
+  }
+
   const patients = useMemo(() => {
     const byKey = new Map<string, RecordItem>();
     for (const r of records) {
@@ -514,7 +528,19 @@ export default function Home() {
     return [...byKey.values()].sort((a, b) => (a.fields[COL.name] || "").localeCompare(b.fields[COL.name] || ""));
   }, [records]);
 
-  const appointments = useMemo(() => records.filter(r => !isRegistered(r)), [records]);
+  const appointments = useMemo(() => {
+    const base = records.filter(r => !isRegistered(r));
+    if (user?.role === "doctor" && user.doctorName) {
+      const normalize = (s?: string) => String(s || "").toLowerCase().replace(/^dr\.?\s*/, "").trim();
+      const myDoc = normalize(user.doctorName);
+      return base.filter(r => {
+        const doc = normalize(r.fields[COL.doctor]);
+        return doc === myDoc || doc.includes(myDoc) || myDoc.includes(doc);
+      });
+    }
+    return base;
+  }, [records, user]);
+
   const doctors = useMemo(() => {
     const list = doctorOptions.map(d => d.name);
     const fromAppts = appointments.map(r => r.fields[COL.doctor]).filter(Boolean);
@@ -529,12 +555,12 @@ export default function Home() {
     return appointments.filter(r => {
       const matchesSearch = [r.fields[COL.name], r.fields[COL.doctor], r.fields[COL.email], r.fields[COL.phone], r.fields[COL.notes]]
         .some(x => low(x).includes(low(search)));
-      const matchesDoctor = !doctorFilter || low(r.fields[COL.doctor]) === low(doctorFilter);
+      const matchesDoctor = user?.role === "doctor" ? true : (!doctorFilter || low(r.fields[COL.doctor]) === low(doctorFilter));
       const matchesStatus = statusFilter === "all" || low(r.fields[COL.status]) === low(statusFilter);
       const matchesMode = modeFilter === "all" || low(modeOf(r.fields)) === low(modeFilter);
       return matchesSearch && matchesDoctor && matchesStatus && matchesMode;
     }).sort((a, b) => `${b.fields[COL.date]}${b.fields[COL.time]}`.localeCompare(`${a.fields[COL.date]}${a.fields[COL.time]}`));
-  }, [appointments, search, doctorFilter, statusFilter, modeFilter]);
+  }, [appointments, search, doctorFilter, statusFilter, modeFilter, user]);
 
   const filteredPatients = useMemo(() => {
     return patients.filter(p =>
@@ -545,7 +571,7 @@ export default function Home() {
 
   const filteredFollowupUpdates = useMemo(() => {
     return followupUpdates.filter(u => {
-      if (inboxFilter === "replies" && (!u.conversations || u.conversations.length === 0)) return false;
+      if (inboxFilter === "replies" && !u.hasReplies && (!u.conversations || u.conversations.length === 0)) return false;
       if (inboxFilter === "urgent" && u.priority !== 4) return false;
       if (inboxSearch.trim()) {
         const q = inboxSearch.trim().toLowerCase();
@@ -583,13 +609,17 @@ export default function Home() {
     }
   }
 
-  async function loadFollowupUpdates(silent = false) {
+  async function loadFollowupUpdates(silent = false, forceRefresh = false) {
     try {
-      const response = await fetch("/api/follow-up/inbox");
+      const url = forceRefresh ? "/api/follow-up/inbox?refresh=1" : "/api/follow-up/inbox";
+      const response = await fetch(url);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load follow-up records.");
       if (Array.isArray(body.updates) && body.updates.length > 0) {
         setFollowupUpdates(body.updates);
+        if (forceRefresh && !silent) {
+          setToast(`Inbox refreshed with ${body.updates.length} message threads.`);
+        }
       }
     } catch (error) {
       if (!silent) setToast(error instanceof Error ? error.message : "Follow-up service notice.");
@@ -1075,8 +1105,10 @@ export default function Home() {
             <IconCross size={18} />
           </div>
           <div>
-            <div className="brand-title">Clinic Desk</div>
-            <div className="brand-subtitle">Clinical Information Management</div>
+            <div className="brand-title">KMC Hospital · Manipal Health Desk</div>
+            <div className="brand-subtitle">
+              {isDoctorRole ? `Clinical Chamber · ${user.doctorName || user.name}` : "Clinical Information & Patient Care"}
+            </div>
           </div>
         </div>
 
@@ -1085,14 +1117,14 @@ export default function Home() {
           <span>Services Operational</span>
         </div>
 
-        {/* PRIMARY NAVIGATION TABS (NO EMOJIS) */}
+        {/* PRIMARY NAVIGATION TABS (DOCTORS ONLY SEE APPOINTMENTS & INBOX) */}
         <nav className="header-nav">
           <button
             className={`nav-item-btn ${tab === "appointments" ? "active" : ""}`}
             onClick={() => { setTab("appointments"); setSearch(""); }}
           >
             <IconCalendar size={13} />
-            <span>Appointments</span>
+            <span>{isDoctorRole ? "My Appointments" : "Appointments"}</span>
             <span className="nav-count-badge">{appointments.length}</span>
           </button>
           {!isDoctorRole && (
@@ -1105,29 +1137,33 @@ export default function Home() {
               <span className="nav-count-badge">{patients.length}</span>
             </button>
           )}
-          <button
-            className={`nav-item-btn ${tab === "doctors" ? "active" : ""}`}
-            onClick={() => { setTab("doctors"); setSearch(""); }}
-          >
-            <IconStethoscope size={13} />
-            <span>Specialists</span>
-            <span className="nav-count-badge">{doctorOptions.length}</span>
-          </button>
+          {!isDoctorRole && (
+            <button
+              className={`nav-item-btn ${tab === "doctors" ? "active" : ""}`}
+              onClick={() => { setTab("doctors"); setSearch(""); }}
+            >
+              <IconStethoscope size={13} />
+              <span>Specialists</span>
+              <span className="nav-count-badge">{doctorOptions.length}</span>
+            </button>
+          )}
           <button
             className={`nav-item-btn ${tab === "followups" ? "active" : ""}`}
             onClick={() => setTab("followups")}
           >
             <IconInbox size={13} />
-            <span>Messages & Inbox</span>
+            <span>{isDoctorRole ? "My Care Messages" : "Messages & Inbox"}</span>
             <span className="nav-count-badge">{followupUpdates.length}</span>
           </button>
-          <button
-            className={`nav-item-btn ${tab === "analytics" ? "active" : ""}`}
-            onClick={() => setTab("analytics")}
-          >
-            <IconAnalytics size={13} />
-            <span>Analytics</span>
-          </button>
+          {!isDoctorRole && (
+            <button
+              className={`nav-item-btn ${tab === "analytics" ? "active" : ""}`}
+              onClick={() => setTab("analytics")}
+            >
+              <IconAnalytics size={13} />
+              <span>Analytics</span>
+            </button>
+          )}
         </nav>
 
         {/* USER PROFILE & ACTIONS */}
@@ -1152,62 +1188,144 @@ export default function Home() {
       </header>
 
       {/* OVERVIEW BAR */}
-      <section className="overview-bar">
-        <div className="overview-content-row">
-          <div className="overview-title-block">
-            <h1>Clinical Operations Overview</h1>
-            <p>
-              {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })} · Logged in as {user.doctorName || user.name} ({user.role})
-            </p>
+      {isDoctorRole ? (
+        <section className="overview-bar" style={{ padding: 0, background: "transparent", border: "none", boxShadow: "none" }}>
+          <div className="doctor-chamber-banner">
+            <div className="doctor-chamber-info">
+              <div className="doctor-avatar-badge">
+                {(user.doctorName || "Dr").replace(/^Dr\.?\s*/i, "").slice(0, 2).toUpperCase()}
+                <span className="doctor-active-pip" title="Active on Duty" />
+              </div>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
+                  <h1 className="doctor-chamber-title">{user.doctorName || user.name}</h1>
+                  <span className="kmc-department-tag">Consultant Physician · Internal Medicine</span>
+                  <span className="kmc-room-tag">OPD Chamber 204</span>
+                </div>
+                <div className="doctor-chamber-sub">
+                  KMC Hospital Mangalore · Clinical Department · Attending Physician Schedule · {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}
+                </div>
+              </div>
+            </div>
+
+            <div className="kpi-metrics-row">
+              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
+                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
+                  <IconCalendar size={12} />
+                  <span>My Consultations</span>
+                </div>
+                <div className="kpi-number" style={{ color: "#ffffff" }}>{appointments.length}</div>
+              </div>
+              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
+                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
+                  <IconClock size={12} />
+                  <span>Today's Queue</span>
+                </div>
+                <div className="kpi-number" style={{ color: "#ffffff" }}>{todayAppointments.length}</div>
+              </div>
+              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
+                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
+                  <IconVideo size={12} />
+                  <span>Telehealth</span>
+                </div>
+                <div className="kpi-number" style={{ color: "#ffffff" }}>{onlineUpcoming.length}</div>
+              </div>
+              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
+                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
+                  <IconInbox size={12} />
+                  <span>Care Messages</span>
+                </div>
+                <div className="kpi-number" style={{ color: "#ffffff" }}>{followupUpdates.length}</div>
+              </div>
+            </div>
           </div>
 
-          <div className="kpi-metrics-row">
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconUsers size={12} />
-                <span>Patients</span>
-              </div>
-              <div className="kpi-number">{patients.length}</div>
+          {/* ACTION SUBBAR FOR DOCTOR */}
+          <div className="action-subbar" style={{ marginTop: 10 }}>
+            <div className="action-btn-cluster">
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  setTab("appointments");
+                  setEditingAppt(null);
+                  setAppt({ patient: "", doctor: user.doctorName || "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
+                }}
+              >
+                <IconCross size={13} />
+                <span>Schedule Consultation</span>
+              </button>
+              <button className="btn-secondary" onClick={exportCSV}>
+                <IconDownload size={13} />
+                <span>Export My Schedule</span>
+              </button>
+              <button className="btn-secondary" onClick={() => window.print()}>
+                <IconPrinter size={13} />
+                <span>Print Daily Roster</span>
+              </button>
             </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconCalendar size={12} />
-                <span>Today's Visits</span>
-              </div>
-              <div className="kpi-number">{todayAppointments.length}</div>
-            </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconVideo size={12} />
-                <span>Telehealth</span>
-              </div>
-              <div className="kpi-number">{onlineUpcoming.length}</div>
-            </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconInbox size={12} />
-                <span>Care Inbox</span>
-              </div>
-              <div className="kpi-number">{followupUpdates.length}</div>
-            </div>
-          </div>
-        </div>
 
-        {/* ACTION SUBBAR */}
-        <div className="action-subbar">
-          <div className="action-btn-cluster">
-            <button
-              className="btn-primary"
-              onClick={() => {
-                setTab("appointments");
-                setEditingAppt(null);
-                setAppt({ patient: "", doctor: "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
-              }}
-            >
-              <IconCross size={13} />
-              <span>Book Appointment</span>
+            <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
+              <IconRefresh size={12} />
+              <span>{busy ? "Refreshing…" : "Sync"}</span>
             </button>
-            {!isDoctorRole && (
+          </div>
+        </section>
+      ) : (
+        <section className="overview-bar">
+          <div className="overview-content-row">
+            <div className="overview-title-block">
+              <h1>Clinical Operations Overview</h1>
+              <p>
+                {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })} · Logged in as {user.doctorName || user.name} ({user.role})
+              </p>
+            </div>
+
+            <div className="kpi-metrics-row">
+              <div className="kpi-metric-box">
+                <div className="kpi-label">
+                  <IconUsers size={12} />
+                  <span>Patients</span>
+                </div>
+                <div className="kpi-number">{patients.length}</div>
+              </div>
+              <div className="kpi-metric-box">
+                <div className="kpi-label">
+                  <IconCalendar size={12} />
+                  <span>Today's Visits</span>
+                </div>
+                <div className="kpi-number">{todayAppointments.length}</div>
+              </div>
+              <div className="kpi-metric-box">
+                <div className="kpi-label">
+                  <IconVideo size={12} />
+                  <span>Telehealth</span>
+                </div>
+                <div className="kpi-number">{onlineUpcoming.length}</div>
+              </div>
+              <div className="kpi-metric-box">
+                <div className="kpi-label">
+                  <IconInbox size={12} />
+                  <span>Care Inbox</span>
+                </div>
+                <div className="kpi-number">{followupUpdates.length}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* ACTION SUBBAR */}
+          <div className="action-subbar">
+            <div className="action-btn-cluster">
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  setTab("appointments");
+                  setEditingAppt(null);
+                  setAppt({ patient: "", doctor: "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
+                }}
+              >
+                <IconCross size={13} />
+                <span>Book Appointment</span>
+              </button>
               <button
                 className="btn-secondary"
                 onClick={() => {
@@ -1219,23 +1337,23 @@ export default function Home() {
                 <IconUsers size={13} />
                 <span>Register Patient</span>
               </button>
-            )}
-            <button className="btn-secondary" onClick={exportCSV}>
-              <IconDownload size={13} />
-              <span>Export CSV</span>
-            </button>
-            <button className="btn-secondary" onClick={() => window.print()}>
-              <IconPrinter size={13} />
-              <span>Print Schedule</span>
+              <button className="btn-secondary" onClick={exportCSV}>
+                <IconDownload size={13} />
+                <span>Export CSV</span>
+              </button>
+              <button className="btn-secondary" onClick={() => window.print()}>
+                <IconPrinter size={13} />
+                <span>Print Schedule</span>
+              </button>
+            </div>
+
+            <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
+              <IconRefresh size={12} />
+              <span>{busy ? "Refreshing…" : "Sync"}</span>
             </button>
           </div>
-
-          <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
-            <IconRefresh size={12} />
-            <span>{busy ? "Refreshing…" : "Sync"}</span>
-          </button>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* WORKSPACE CONTENT */}
       <main className="main-workspace-container">
@@ -1265,16 +1383,23 @@ export default function Home() {
                 )}
               </div>
 
-              <select
-                style={{ width: "auto", minWidth: "160px", height: "36px", fontSize: "12.5px" }}
-                value={doctorFilter}
-                onChange={e => setDoctorFilter(e.target.value)}
-              >
-                <option value="">All Physicians ({doctors.length})</option>
-                {doctors.map(d => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
+              {!isDoctorRole ? (
+                <select
+                  style={{ width: "auto", minWidth: "160px", height: "36px", fontSize: "12.5px" }}
+                  value={doctorFilter}
+                  onChange={e => setDoctorFilter(e.target.value)}
+                >
+                  <option value="">All Physicians ({doctors.length})</option>
+                  {doctors.map(d => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", padding: "0 12px", height: "36px", backgroundColor: "var(--primary-50)", border: "1px solid var(--primary-line)", borderRadius: "6px", fontSize: "12px", fontWeight: 700, color: "var(--primary-700)" }}>
+                  <IconStethoscope size={13} />
+                  <span>Chamber: {user.doctorName}</span>
+                </div>
+              )}
 
               <div className="filter-segmented-group">
                 <button
@@ -1356,18 +1481,25 @@ export default function Home() {
 
                 <div className="form-field-group">
                   <label className="form-label">Attending Physician *</label>
-                  <select
-                    required
-                    value={appt.doctor}
-                    onChange={e => setAppt({ ...appt, doctor: e.target.value })}
-                  >
-                    <option value="">Select specialist</option>
-                    {doctorOptions.map(d => (
-                      <option key={d.name} value={d.name}>
-                        {d.name} ({d.specialization})
-                      </option>
-                    ))}
-                  </select>
+                  {isDoctorRole ? (
+                    <div style={{ padding: "8px 12px", background: "var(--primary-50)", border: "1px solid var(--primary-line)", borderRadius: "6px", fontSize: "13px", fontWeight: 700, color: "var(--primary-700)", display: "flex", alignItems: "center", gap: "8px" }}>
+                      <IconStethoscope size={14} />
+                      <span>{user.doctorName} (Consultant Physician)</span>
+                    </div>
+                  ) : (
+                    <select
+                      required
+                      value={appt.doctor}
+                      onChange={e => setAppt({ ...appt, doctor: e.target.value })}
+                    >
+                      <option value="">Select specialist</option>
+                      {doctorOptions.map(d => (
+                        <option key={d.name} value={d.name}>
+                          {d.name} ({d.specialization})
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 <div className="form-field-group">
@@ -1574,6 +1706,16 @@ export default function Home() {
 
                           {/* Actions */}
                           <div className="item-action-footer">
+                            {!isCancelled && !isCompleted && (
+                              <button
+                                type="button"
+                                className="action-sub-btn btn-complete-consultation"
+                                onClick={() => void completeConsultation(r)}
+                              >
+                                <span>✓</span>
+                                <span>Complete Consultation</span>
+                              </button>
+                            )}
                             {isCompleted && (
                               <button
                                 className="action-sub-btn btn-discharge"
@@ -1635,18 +1777,25 @@ export default function Home() {
                   Roster view for date selection.
                 </div>
 
-                <div className="form-field-group">
-                  <label className="form-label">Filter Physician</label>
-                  <select
-                    value={doctorFilter}
-                    onChange={e => setDoctorFilter(e.target.value)}
-                  >
-                    <option value="">All clinic physicians</option>
-                    {doctors.map(d => (
-                      <option key={d} value={d}>{d}</option>
-                    ))}
-                  </select>
-                </div>
+                {!isDoctorRole ? (
+                  <div className="form-field-group">
+                    <label className="form-label">Filter Physician</label>
+                    <select
+                      value={doctorFilter}
+                      onChange={e => setDoctorFilter(e.target.value)}
+                    >
+                      <option value="">All clinic physicians</option>
+                      {doctors.map(d => (
+                        <option key={d} value={d}>{d}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div style={{ marginBottom: "14px", padding: "8px 12px", background: "var(--primary-50)", border: "1px solid var(--primary-line)", borderRadius: "6px", fontSize: "12px", color: "var(--primary-700)", fontWeight: 700, display: "flex", alignItems: "center", gap: "6px" }}>
+                    <IconStethoscope size={13} />
+                    <span>Consultation Chamber: {user.doctorName}</span>
+                  </div>
+                )}
 
                 <div className="calendar-nav-toolbar">
                   <button
@@ -2032,41 +2181,68 @@ export default function Home() {
           <div className="card-panel" style={{ maxWidth: "1050px", margin: "0 auto" }}>
             <div className="panel-header-line">
               <h2 className="panel-title">
-                <span>Care Communications & Messages Inbox</span>
+                <span>{isDoctorRole ? "My Care Communications & Consultation Messages" : "Care Communications & Messages Inbox"}</span>
                 <span className="nav-count-badge">{filteredFollowupUpdates.length}</span>
               </h2>
-              <button className="btn-secondary" onClick={() => void loadFollowupUpdates()}>
+              <button className="btn-secondary" onClick={() => void loadFollowupUpdates(false, true)}>
                 <IconRefresh size={12} />
                 <span>Refresh Messages</span>
               </button>
             </div>
             <div className="panel-subtitle">
-              Centralized reception desk communications. Synchronizes patient responses, physician updates, and Freshdesk email conversation threads.
+              {isDoctorRole
+                ? `Dedicated doctor consultation desk inbox. Filtered exclusively for appointments and patient messages for ${user.doctorName}.`
+                : "Centralized reception desk communications. Synchronizes patient responses, physician updates, and Freshdesk email conversation threads."}
             </div>
 
-            {/* Receptionist Automatic Notification Callout */}
-            <div
-              style={{
-                backgroundColor: "var(--primary-50)",
-                border: "1px solid var(--primary-line)",
-                borderRadius: "8px",
-                padding: "12px 16px",
-                margin: "12px 0 16px 0",
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "10px",
-                fontSize: "12.5px",
-                color: "var(--primary-700)",
-                lineHeight: "1.5",
-              }}
-            >
-              <div style={{ flexShrink: 0, marginTop: "2px" }}>
-                <IconInbox size={15} />
+            {/* Notification Callout */}
+            {isDoctorRole ? (
+              <div
+                style={{
+                  backgroundColor: "var(--kmc-blue-50)",
+                  border: "1px solid var(--kmc-blue-line)",
+                  borderRadius: "8px",
+                  padding: "12px 16px",
+                  margin: "12px 0 16px 0",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "10px",
+                  fontSize: "12.5px",
+                  color: "var(--kmc-blue)",
+                  lineHeight: "1.5",
+                }}
+              >
+                <div style={{ flexShrink: 0, marginTop: "2px" }}>
+                  <IconInbox size={15} />
+                </div>
+                <div>
+                  <strong>Doctor Consultation Inbox:</strong> Showing only patient inquiries and follow-up communications linked to your appointments with <strong>{user.doctorName}</strong>. Replies sent here are directly delivered to the patient via Freshdesk, keeping clinical records synchronized with the hospital.
+                </div>
               </div>
-              <div>
-                <strong>Receptionist Direct Notification Active:</strong> All consultation notices and follow-ups are assigned to Receptionist Agent <em>vrushali p</em> (<code>shreyas.kulkunda@bixbytessolutions.com</code>). When any patient or doctor replies, Freshdesk automatically emails the receptionist immediately and pulls their response into this care thread. You can review dialogue and respond directly below.
+            ) : (
+              <div
+                style={{
+                  backgroundColor: "var(--primary-50)",
+                  border: "1px solid var(--primary-line)",
+                  borderRadius: "8px",
+                  padding: "12px 16px",
+                  margin: "12px 0 16px 0",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "10px",
+                  fontSize: "12.5px",
+                  color: "var(--primary-700)",
+                  lineHeight: "1.5",
+                }}
+              >
+                <div style={{ flexShrink: 0, marginTop: "2px" }}>
+                  <IconInbox size={15} />
+                </div>
+                <div>
+                  <strong>Receptionist Direct Notification Active:</strong> All consultation notices and follow-ups are assigned to Receptionist Agent <em>vrushali p</em> (<code>shreyas.kulkunda@bixbytessolutions.com</code>). When any patient or doctor replies, Freshdesk automatically emails the receptionist immediately and pulls their response into this care thread. You can review dialogue and respond directly below.
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Inbox Search & Filter Toolbar */}
             <div
@@ -2107,7 +2283,7 @@ export default function Home() {
                   style={{ fontWeight: inboxFilter === "replies" ? 700 : 500, backgroundColor: inboxFilter === "replies" ? "var(--primary-600)" : "#ffffff", color: inboxFilter === "replies" ? "#ffffff" : "var(--ink-700)" }}
                   onClick={() => setInboxFilter("replies")}
                 >
-                  With Replies ({followupUpdates.filter(u => u.conversations && u.conversations.length > 0).length})
+                  With Replies ({followupUpdates.filter(u => u.hasReplies || (u.conversations && u.conversations.length > 0)).length})
                 </button>
                 <button
                   type="button"
@@ -2164,7 +2340,7 @@ export default function Home() {
                             <span style={{ fontSize: "11px", color: "var(--ink-500)", background: "var(--surface-subtle)", padding: "2px 6px", borderRadius: "4px" }}>
                               Ticket #{u.id}
                             </span>
-                            {hasConversations && (
+                            {(hasConversations || u.hasReplies) && (
                               <span
                                 style={{
                                   fontSize: "11px",
@@ -2176,7 +2352,7 @@ export default function Home() {
                                   borderRadius: "12px",
                                 }}
                               >
-                                💬 {u.conversations!.length} {u.conversations!.length === 1 ? "Conversation" : "Conversations"}
+                                💬 {u.conversations && u.conversations.length > 0 ? `${u.conversations.length} ${u.conversations.length === 1 ? "Conversation" : "Conversations"}` : "Reply Received"}
                               </span>
                             )}
                           </div>
@@ -2189,7 +2365,7 @@ export default function Home() {
                       {/* Right Badges */}
                       <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                         <span style={{ fontSize: "11px", color: "var(--ink-500)", background: "#ffffff", border: "1px solid var(--line-200)", padding: "2px 8px", borderRadius: "4px" }}>
-                          Assigned: Receptionist
+                          {isDoctorRole ? `Physician: ${user.doctorName}` : "Assigned: Receptionist"}
                         </span>
                         {u.priority === 4 ? (
                           <span className="clinical-badge cancelled">
@@ -2277,6 +2453,24 @@ export default function Home() {
                         <div style={{ fontSize: "12.5px", fontWeight: 700, color: "var(--ink-900)", marginBottom: "6px" }}>
                           Reply to {u.name} ({u.email}):
                         </div>
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "10px" }}>
+                          <span style={{ fontSize: "11px", color: "var(--ink-500)", alignSelf: "center", marginRight: "2px" }}>Quick Templates:</span>
+                          {[
+                            "Please continue your prescribed medications as advised.",
+                            "Your laboratory and test reports look normal.",
+                            "Please attend your scheduled follow-up consultation on time.",
+                            "If symptoms worsen, please visit the emergency or OPD immediately."
+                          ].map((chip, idx) => (
+                            <button
+                              key={idx}
+                              type="button"
+                              className="quick-reply-chip"
+                              onClick={() => setReplyMessageText(prev => prev ? `${prev} ${chip}` : chip)}
+                            >
+                              {chip}
+                            </button>
+                          ))}
+                        </div>
                         <textarea
                           rows={3}
                           placeholder={`Write a reply to ${u.name}... This message will be delivered directly to their inbox via Freshdesk.`}
@@ -2347,7 +2541,9 @@ export default function Home() {
                 <div style={{ padding: "40px 16px", textAlign: "center", color: "var(--ink-500)", border: "1px dashed var(--line-200)", borderRadius: "8px" }}>
                   <div style={{ fontSize: "14px", fontWeight: 600, color: "var(--ink-900)" }}>No communications found</div>
                   <div style={{ fontSize: "12px", marginTop: "4px" }}>
-                    {inboxSearch || inboxFilter !== "all"
+                    {inboxFilter === "replies"
+                      ? "No messages currently have conversation replies. All incoming tickets are listed under 'All'."
+                      : inboxSearch || inboxFilter !== "all"
                       ? "No items match your filter criteria. Try clearing search filters."
                       : "Incoming patient and physician email replies will automatically appear here."}
                   </div>
