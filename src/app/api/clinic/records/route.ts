@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readClinicSession } from "@/lib/auth";
-import { airtableRequest, listAirtableRecords, saveAirtableRecord } from "@/lib/airtable";
+import { deleteAirtableRecord, listAirtableRecords, saveAirtableRecord } from "@/lib/airtable";
 
 export const runtime = "nodejs";
 
@@ -44,6 +44,6 @@ export async function DELETE(request: Request) {
   if (session.role !== "receptionist") return NextResponse.json({ error: "Only receptionists can delete clinic records." }, { status: 403 });
   const id = new URL(request.url).searchParams.get("id") || "";
   if (!/^rec[a-zA-Z0-9]+$/.test(id)) return NextResponse.json({ error: "Invalid Airtable record ID." }, { status: 400 });
-  try { await airtableRequest(`/${encodeURIComponent(id)}`, { method: "DELETE" }); return NextResponse.json({ ok: true }); }
+  try { await deleteAirtableRecord(id); return NextResponse.json({ ok: true }); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not delete Airtable record." }, { status: 502 }); }
 }
