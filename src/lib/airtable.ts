@@ -1,5 +1,25 @@
 const apiRoot = "https://api.airtable.com/v0";
 
+export const COL = {
+  name: "Patient Name",
+  email: "Patient Email",
+  phone: "Phone No",
+  date: "Appointment Date",
+  time: "Appointment Time",
+  doctor: "Doctor",
+  status: "Status",
+  mode: "Mode",
+  bloodGroup: "Blood Group",
+  notes: "Medical Notes",
+  age: "Age",
+  gender: "Gender",
+  zoomId: "Zoom Meeting ID",
+  zoomUrl: "Zoom Join URL",
+  calendarId: "Google Calendar Event ID",
+  followupDay: "Follow-up Day",
+  followupStart: "Follow-up Start",
+} as const;
+
 function hasAirtableConfig() {
   const token = process.env.AIRTABLE_TOKEN?.trim();
   const base = process.env.AIRTABLE_BASE_ID?.trim();

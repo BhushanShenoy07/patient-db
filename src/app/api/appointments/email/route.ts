@@ -1,44 +1,299 @@
 import { NextResponse } from "next/server";
-import { listClinicDoctors, readClinicSession } from "@/lib/auth";
+import { listClinicDoctors, loadClinicAccounts, readClinicSession } from "@/lib/auth";
 import { createAppointmentActionToken, createFollowupTicket, escapeHtml } from "@/lib/followups";
+import { airtableRequest, COL } from "@/lib/airtable";
 
 export const runtime = "nodejs";
 
+const normalizeDoc = (name?: string) =>
+  (name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^dr\.?\s*/, "")
+    .replace(/[^a-z0-9]/g, "");
+
+function formatDisplayDate(dateStr: string): string {
+  try {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    if (!y || !m || !d) return dateStr;
+    const date = new Date(y, m - 1, d);
+    return date.toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
 export async function POST(request: Request) {
   const session = readClinicSession(request);
-  if (!session) return NextResponse.json({ error: "Sign in before emailing an appointment." }, { status: 401 });
+  if (!session) {
+    return NextResponse.json({ error: "Sign in before sending appointment notifications." }, { status: 401 });
+  }
+
   try {
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
     const appointmentId = typeof body.appointmentId === "string" ? body.appointmentId.trim() : "";
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-    const doctor = typeof body.doctor === "string" ? body.doctor.trim() : "";
-    const date = typeof body.date === "string" ? body.date : "";
-    const time = typeof body.time === "string" ? body.time : "";
-    const mode = body.mode === "Online" ? "Online" : "Offline";
-    const doctorAccount = listClinicDoctors().find(item => item.name.toLowerCase() === doctor.toLowerCase());
-    if (!appointmentId || !name || !/^\S+@\S+\.\S+$/.test(email) || !doctorAccount?.email || !date || !time || !["Scheduled", "Cancelled"].includes(body.status)) {
-      return NextResponse.json({ error: "Appointment needs a patient email, a doctor with a configured clinic email account, date, time, and a Scheduled or Cancelled status." }, { status: 400 });
+
+    // 1. Fetch fresh record details from Airtable
+    let airtableFields: Record<string, any> = {};
+    if (appointmentId && appointmentId.startsWith("rec")) {
+      try {
+        const airtableRecord = await airtableRequest(`/${appointmentId}`);
+        if (airtableRecord?.fields) {
+          airtableFields = airtableRecord.fields;
+        }
+      } catch (err) {
+        console.warn("Could not query Airtable directly for email details; falling back to request payload:", err);
+      }
     }
-    if (session.role === "doctor" && doctorAccount.name.toLowerCase() !== session.doctorName?.toLowerCase()) {
-      return NextResponse.json({ error: "You can only email your own appointments." }, { status: 403 });
+
+    // 2. Extract and merge fields with Airtable taking precedence
+    const name = String(airtableFields[COL.name] || body.name || "").trim();
+    const email = String(airtableFields[COL.email] || body.email || "").trim().toLowerCase();
+    const phone = String(airtableFields[COL.phone] || body.phone || "").trim();
+    const doctor = String(airtableFields[COL.doctor] || body.doctor || "").trim();
+    const date = String(airtableFields[COL.date] || body.date || "").trim();
+    const time = String(airtableFields[COL.time] || body.time || "").trim();
+    const rawMode = String(airtableFields[COL.mode] || body.mode || "Online").trim();
+    const mode = rawMode.toLowerCase() === "online" ? "Online" : "Offline";
+    const status = String(airtableFields[COL.status] || body.status || "Scheduled").trim();
+    const zoomId = String(airtableFields[COL.zoomId] || body.zoomId || "").trim();
+    const zoomUrl = String(airtableFields[COL.zoomUrl] || body.zoomUrl || "").trim();
+    const notes = String(airtableFields[COL.notes] || body.notes || "").trim();
+    const bloodGroup = String(airtableFields[COL.bloodGroup] || body.bloodGroup || "").trim();
+
+    // 3. Resolve Doctor account & email
+    const clinicDoctors = listClinicDoctors();
+    const allAccounts = loadClinicAccounts();
+    const doctorAccount =
+      clinicDoctors.find(d => normalizeDoc(d.name) === normalizeDoc(doctor)) ||
+      allAccounts.find(a => normalizeDoc(a.doctorName || a.name) === normalizeDoc(doctor));
+
+    const doctorEmail = (doctorAccount?.email || `${normalizeDoc(doctor)}@clinic.com`).trim().toLowerCase();
+
+    // 4. Validate essential fields
+    if (!appointmentId || !name || !/^\S+@\S+\.\S+$/.test(email) || !doctor || !date || !time) {
+      return NextResponse.json(
+        { error: "Appointment requires a patient name, valid email address, assigned physician, date, and time." },
+        { status: 400 }
+      );
     }
-    const token = body.status === "Scheduled" ? createAppointmentActionToken({ appointmentId, name, email, doctor, doctorEmail: doctorAccount.email, date, time, mode, zoomId: body.zoomId, zoomUrl: body.zoomUrl }) : "";
+
+    if (session.role === "doctor" && session.doctorName && normalizeDoc(doctor) !== normalizeDoc(session.doctorName)) {
+      return NextResponse.json({ error: "Physicians can only dispatch notifications for their own consultations." }, { status: 403 });
+    }
+
+    // 5. Generate secure patient action token
+    const isCancelled = status.toLowerCase() === "cancelled";
+    const token = !isCancelled
+      ? createAppointmentActionToken({
+          appointmentId,
+          name,
+          email,
+          doctor,
+          doctorEmail,
+          date,
+          time,
+          mode,
+          zoomId,
+          zoomUrl,
+        })
+      : "";
+
     const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
-    const actionUrl = (action: string) => { const url = new URL("/appointment-response", origin); url.searchParams.set("token", token); url.searchParams.set("action", action); return url.toString(); };
+    const actionUrl = (action: string) => {
+      const url = new URL("/appointment-response", origin);
+      url.searchParams.set("token", token);
+      url.searchParams.set("action", action);
+      return url.toString();
+    };
+
     const safeName = escapeHtml(name);
-    const when = `${escapeHtml(date)} at ${escapeHtml(time)}`;
-    const zoom = mode === "Online" && typeof body.zoomUrl === "string" && body.zoomUrl ? `<p><a href="${escapeHtml(body.zoomUrl)}">Join your Zoom appointment</a></p>` : "";
-    const address = mode === "Offline" ? `<p><strong>Clinic location:</strong> ${process.env.CLINIC_ADDRESS ? escapeHtml(process.env.CLINIC_ADDRESS) : "Please contact the clinic for directions."}</p>` : "";
-    const cancelled = body.status === "Cancelled";
+    const safeDoctor = escapeHtml(doctor);
+    const safeDate = escapeHtml(formatDisplayDate(date));
+    const safeTime = escapeHtml(time);
+    const isOnline = mode === "Online";
+    const clinicAddress = process.env.CLINIC_ADDRESS || "Clinic Desk Healthcare Centre, Bejai, Mangaluru, Karnataka, India";
+
+    // 6. Frame Kindful, Healthcare-Grade HTML Email Body
+    let emailHtml = "";
+    let emailSubject = "";
+
+    if (isCancelled) {
+      emailSubject = `Clinic Desk · Appointment Cancellation Notice · ${name} with ${doctor} · ${date}`;
+      emailHtml = `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <div style="background: linear-gradient(135deg, #475569 0%, #334155 100%); padding: 24px; color: #ffffff; text-align: center;">
+            <h1 style="margin: 0 0 6px 0; font-size: 22px; font-weight: 700;">Clinic Desk Healthcare</h1>
+            <p style="margin: 0; font-size: 14px; opacity: 0.9;">Appointment Cancellation Notice</p>
+          </div>
+          <div style="padding: 24px;">
+            <p style="font-size: 16px; margin: 0 0 16px 0;">Dear <strong>${safeName}</strong>,</p>
+            <p style="font-size: 15px; line-height: 1.6; color: #334155; margin: 0 0 20px 0;">
+              This is a gentle notification that your scheduled consultation with <strong>${safeDoctor}</strong> on <strong>${safeDate} at ${safeTime}</strong> has been cancelled in our clinic records.
+            </p>
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 0 0 20px 0; font-size: 14px;">
+              <p style="margin: 0 0 6px 0; color: #64748b;"><strong>Reference ID:</strong> ${escapeHtml(appointmentId)}</p>
+              <p style="margin: 0 0 6px 0; color: #64748b;"><strong>Physician:</strong> ${safeDoctor}</p>
+              <p style="margin: 0; color: #64748b;"><strong>Original Time:</strong> ${safeDate} at ${safeTime}</p>
+            </div>
+            <p style="font-size: 14px; line-height: 1.6; color: #475569; margin: 0 0 20px 0;">
+              We understand that plans can change. Whenever you are ready to reschedule or need medical assistance, our clinic desk is here to welcome you.
+            </p>
+            <p style="font-size: 14px; line-height: 1.5; color: #334155; margin: 0;">
+              Wishing you good health and well-being,<br/>
+              <strong>Clinic Desk Healthcare Team</strong>
+            </p>
+          </div>
+        </div>
+      `;
+    } else {
+      emailSubject = `Clinic Desk · ${isOnline ? "Telehealth Consultation" : "In-Person Consultation"} Confirmed · ${name} with ${doctor} · ${date}`;
+      emailHtml = `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 620px; margin: 0 auto; color: #1e293b; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);">
+          <!-- Header Banner -->
+          <div style="background: linear-gradient(135deg, #0d9488 0%, #0891b2 100%); padding: 28px 24px; color: #ffffff; text-align: center;">
+            <h1 style="margin: 0 0 6px 0; font-size: 24px; font-weight: 700; letter-spacing: -0.02em;">Clinic Desk Healthcare</h1>
+            <p style="margin: 0; font-size: 14px; opacity: 0.95; font-weight: 400;">Compassionate Medical Care & Consultation</p>
+          </div>
+
+          <div style="padding: 28px 24px;">
+            <!-- Kindful Opening Message -->
+            <p style="font-size: 16px; margin: 0 0 16px 0;">Dear <strong>${safeName}</strong>,</p>
+            <p style="font-size: 15px; line-height: 1.6; color: #334155; margin: 0 0 20px 0;">
+              We hope this message finds you in good health and peaceful spirits. It is our pleasure to confirm that your consultation with <strong>${safeDoctor}</strong> has been successfully scheduled and securely recorded in our clinic care registry.
+            </p>
+
+            <!-- Consultation Details Card -->
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+              <h3 style="margin: 0 0 14px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; font-weight: 700;">Consultation Summary</h3>
+              <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                <tbody>
+                  <tr>
+                    <td style="padding: 6px 0; color: #64748b; width: 140px;">Patient:</td>
+                    <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${safeName}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color: #64748b;">Attending Doctor:</td>
+                    <td style="padding: 6px 0; font-weight: 600; color: #0d9488;">${safeDoctor}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color: #64748b;">Date:</td>
+                    <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${safeDate}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color: #64748b;">Time Slot:</td>
+                    <td style="padding: 6px 0; font-weight: 600; color: #0f172a;">${safeTime}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 6px 0; color: #64748b;">Consultation Mode:</td>
+                    <td style="padding: 6px 0; font-weight: 600; color: ${isOnline ? "#0284c7" : "#059669"};">
+                      ${isOnline ? "Online Telehealth Consultation" : "In-Person Clinic Visit"}
+                    </td>
+                  </tr>
+                  ${phone ? `<tr><td style="padding: 6px 0; color: #64748b;">Contact Phone:</td><td style="padding: 6px 0; color: #0f172a;">${escapeHtml(phone)}</td></tr>` : ""}
+                  ${bloodGroup ? `<tr><td style="padding: 6px 0; color: #64748b;">Blood Group:</td><td style="padding: 6px 0; color: #0f172a;">${escapeHtml(bloodGroup)}</td></tr>` : ""}
+                  ${notes ? `<tr><td style="padding: 6px 0; color: #64748b; vertical-align: top;">Clinical Notes:</td><td style="padding: 6px 0; color: #334155;">${escapeHtml(notes)}</td></tr>` : ""}
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Online / Offline Specific Block -->
+            ${
+              isOnline
+                ? `
+              <!-- ONLINE TELEHEALTH WITH ZOOM LINK -->
+              <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 5px solid #16a34a; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+                <h3 style="margin: 0 0 10px 0; font-size: 16px; color: #166534; font-weight: 700;">Telehealth Video Consultation Link</h3>
+                <p style="margin: 0 0 14px 0; font-size: 14px; line-height: 1.5; color: #14532d;">
+                  Your digital consultation room is prepared. Please use the button below to join ${safeDoctor} at your appointed time:
+                </p>
+                <div style="text-align: center; margin: 16px 0;">
+                  <a href="${escapeHtml(zoomUrl || `https://zoom.us/j/${zoomId}?pwd=CLINIC`)}" style="background-color: #16a34a; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 600; font-size: 15px; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" target="_blank">
+                    Join Zoom Video Consultation
+                  </a>
+                </div>
+                <div style="margin: 10px 0 0 0; font-size: 13px; color: #15803d; text-align: center;">
+                  ${zoomUrl ? `<strong>Direct Link:</strong> <a href="${escapeHtml(zoomUrl)}" style="color: #0369a1; word-break: break-all;">${escapeHtml(zoomUrl)}</a><br/>` : ""}
+                  ${zoomId ? `<strong>Meeting ID:</strong> ${escapeHtml(zoomId)}` : ""}
+                </div>
+                <div style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #bbf7d0; font-size: 12px; color: #166534; line-height: 1.4;">
+                  <strong>Helpful Tips:</strong> Please join 5 minutes early to test your audio and video. Find a quiet, well-lit space and keep any medical reports or prescriptions nearby.
+                </div>
+              </div>
+            `
+                : `
+              <!-- OFFLINE IN-PERSON VISIT WITHOUT ZOOM LINK -->
+              <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 5px solid #0284c7; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+                <h3 style="margin: 0 0 10px 0; font-size: 16px; color: #0369a1; font-weight: 700;">In-Person Clinic Visit Instructions</h3>
+                <p style="margin: 0 0 8px 0; font-size: 14px; line-height: 1.5; color: #1e293b;">
+                  <strong>Clinic Location:</strong><br/>
+                  ${escapeHtml(clinicAddress)}
+                </p>
+                <p style="margin: 8px 0 0 0; font-size: 13px; line-height: 1.5; color: #475569;">
+                  <strong>Visiting Guidelines:</strong> Please arrive 10 to 15 minutes before your consultation for initial check-in and vital signs check. Valet parking and patient assistance are available at our main entrance.
+                </p>
+              </div>
+            `
+            }
+
+            <!-- Kindful Reassurance -->
+            <p style="font-size: 14px; line-height: 1.6; color: #475569; margin: 0 0 20px 0;">
+              Your health, comfort, and peace of mind are always our highest priorities. Should you have any questions or feel unwell prior to your visit, please do not hesitate to contact our care team immediately.
+            </p>
+
+            <!-- Care Continuity Action Links -->
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin: 0 0 24px 0; text-align: center; font-size: 13px;">
+              <span style="color: #64748b; font-weight: 600; display: block; margin-bottom: 6px;">Manage Your Appointment:</span>
+              <a href="${actionUrl("confirm")}" style="color: #0d9488; text-decoration: none; font-weight: 600; margin: 0 10px;">Confirm Appointment</a> |
+              <a href="${actionUrl("reschedule")}" style="color: #0284c7; text-decoration: none; font-weight: 600; margin: 0 10px;">Request Reschedule</a> |
+              <a href="${actionUrl("cancel")}" style="color: #e11d48; text-decoration: none; font-weight: 600; margin: 0 10px;">Cancel Visit</a>
+            </div>
+
+            <!-- Sign-off -->
+            <p style="font-size: 14px; line-height: 1.5; color: #334155; margin: 0;">
+              Wishing you sound health and gentle healing,<br/>
+              <strong>Clinic Desk Healthcare Team</strong><br/>
+              <span style="font-size: 12px; color: #64748b;">In care partnership with ${safeDoctor}</span>
+            </p>
+          </div>
+        </div>
+      `;
+    }
+
+    // 7. Dispatch through Freshdesk (with doctor CC)
+    const ccEmails = doctorEmail && doctorEmail.toLowerCase() !== email.toLowerCase() ? [doctorEmail] : [];
+
     const ticket = await createFollowupTicket({
-      email, name, ccEmails: [doctorAccount.email], subject: `Clinic Desk · Appointment ${cancelled ? "cancelled" : date} · ${name}`,
-      tags: [cancelled ? "clinic_appointment_cancelled" : "clinic_appointment", `appointment_${appointmentId}`],
-      description: cancelled ? `<p>Hello ${safeName},</p><p>Your appointment with ${escapeHtml(doctor)} on ${when} has been cancelled.</p><p>Contact the Clinic Desk if you would like to schedule another visit.</p>` : `<p>Hello ${safeName},</p><p>Your appointment with ${escapeHtml(doctor)} is scheduled for ${when} (${mode}).</p>${zoom}${address}<p>Use these links to send the clinic a request:</p><p><a href="${actionUrl("confirm")}">Confirm appointment</a> · <a href="${actionUrl("reschedule")}">Request a reschedule</a> · <a href="${actionUrl("cancel")}">Request cancellation</a></p><p>The clinic team will update its calendar and contact you to confirm any change.</p>`,
+      email,
+      name,
+      ccEmails,
+      subject: emailSubject,
+      description: emailHtml,
+      priority: 2,
+      tags: [
+        isCancelled ? "clinic_appointment_cancelled" : "clinic_appointment",
+        mode.toLowerCase(),
+        `appointment_${appointmentId}`,
+      ],
     });
-    return NextResponse.json({ ok: true, ticketId: ticket.id, doctorEmail: doctorAccount.email });
+
+    return NextResponse.json({
+      ok: true,
+      ticketId: ticket.id,
+      patientEmail: email,
+      doctorEmail,
+      mode,
+      hasZoom: isOnline && Boolean(zoomUrl || zoomId),
+      freshserviceTicketId: (ticket as any).freshserviceTicketId,
+    });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not send appointment email.";
+    const message = error instanceof Error ? error.message : "Could not dispatch appointment email.";
+    console.error("Appointment email route error:", error);
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

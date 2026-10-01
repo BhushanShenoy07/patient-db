@@ -51,14 +51,26 @@ export async function POST(request: Request) {
       const start = `${date}T${time.length === 5 ? `${time}:00` : time}`;
       const startDate = new Date(`${start}+05:30`);
       const endDate = new Date(startDate.getTime() + (Number(duration) || 30) * 60_000);
+      const zoomUrl = typeof body.zoomUrl === "string" ? body.zoomUrl : "";
+      const clinicAddress = process.env.CLINIC_ADDRESS || "Clinic Desk Healthcare Centre, Bejai, Mangaluru, Karnataka, India";
       const event = {
-        summary: `Clinic appointment: ${name} with ${doctor}`,
-        description: `${mode === "Online" ? "Online Zoom appointment" : "In-person clinic appointment"}${email ? `\nPatient: ${email}` : ""}`,
+        summary: `Clinical Consultation: ${name} with ${doctor}`,
+        description: `${mode === "Online" ? "Online Telehealth Consultation via Zoom" : "In-Person Clinic Consultation"}\nPatient: ${name}${email ? ` (${email})` : ""}\nAttending Physician: ${doctor}${zoomUrl ? `\nZoom Video Meeting: ${zoomUrl}` : ""}${mode === "Offline" ? `\nClinic Location: ${clinicAddress}` : ""}`,
+        location: mode === "Online" ? (zoomUrl || "Zoom Video Consultation") : clinicAddress,
         start: { dateTime: startDate.toISOString(), timeZone: "Asia/Kolkata" },
         end: { dateTime: endDate.toISOString(), timeZone: "Asia/Kolkata" },
       };
       const isExistingValid = existingEventId && !existingEventId.startsWith("cal_");
-      const saved = await calendarRequest(isExistingValid ? "PATCH" : "POST", isExistingValid ? existingEventId : null, event);
+      let saved;
+      if (isExistingValid) {
+        try {
+          saved = await calendarRequest("PATCH", existingEventId, event);
+        } catch {
+          saved = await calendarRequest("POST", null, event);
+        }
+      } else {
+        saved = await calendarRequest("POST", null, event);
+      }
       return NextResponse.json({ ok: true, eventId: saved.id });
     } catch (apiError) {
       console.warn("Google Calendar API call failed; returning resilient simulated event ID:", apiError instanceof Error ? apiError.message : apiError);

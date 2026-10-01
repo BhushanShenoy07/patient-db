@@ -57,10 +57,16 @@ export function readAppointmentActionToken(token: string): AppointmentActionToke
   } catch { return null; }
 }
 
-function hasFreshdeskConfig() {
+export function hasFreshdeskConfig() {
   const domain = process.env.FRESHDESK_DOMAIN?.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
   const apiKey = process.env.FRESHDESK_API_KEY?.trim();
   return Boolean(domain && domain !== "xxx" && /^[a-z0-9-]+\.freshdesk\.com$/i.test(domain) && apiKey && apiKey !== "xxx");
+}
+
+export function hasFreshserviceConfig() {
+  const domain = process.env.FRESHSERVICE_DOMAIN?.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const apiKey = process.env.FRESHSERVICE_API_KEY?.trim();
+  return Boolean(domain && domain !== "xxx" && /^[a-z0-9-]+\.freshservice\.com$/i.test(domain) && apiKey && apiKey !== "xxx");
 }
 
 function freshdeskConfig() {
@@ -68,6 +74,15 @@ function freshdeskConfig() {
   const apiKey = process.env.FRESHDESK_API_KEY?.trim();
   if (!domain || !apiKey || domain === "xxx" || apiKey === "xxx" || !/^[a-z0-9-]+\.freshdesk\.com$/i.test(domain)) {
     throw new Error("Configure FRESHDESK_DOMAIN and FRESHDESK_API_KEY on the server.");
+  }
+  return { base: `https://${domain}/api/v2`, authorization: `Basic ${Buffer.from(`${apiKey}:X`).toString("base64")}` };
+}
+
+function freshserviceConfig() {
+  const domain = process.env.FRESHSERVICE_DOMAIN?.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const apiKey = process.env.FRESHSERVICE_API_KEY?.trim();
+  if (!domain || !apiKey || domain === "xxx" || apiKey === "xxx" || !/^[a-z0-9-]+\.freshservice\.com$/i.test(domain)) {
+    throw new Error("Configure FRESHSERVICE_DOMAIN and FRESHSERVICE_API_KEY on the server.");
   }
   return { base: `https://${domain}/api/v2`, authorization: `Basic ${Buffer.from(`${apiKey}:X`).toString("base64")}` };
 }
@@ -145,16 +160,108 @@ export async function freshdeskRequest(path: string, init: RequestInit = {}) {
   return body;
 }
 
-export async function createFollowupTicket(input: { email: string; name: string; subject: string; description: string; tags: string[]; priority?: number; ccEmails?: string[] }) {
-  if (hasFreshdeskConfig()) {
+export async function freshserviceRequest(path: string, init: RequestInit = {}) {
+  const config = freshserviceConfig();
+  const response = await fetch(`${config.base}${path}`, { ...init, headers: { Authorization: config.authorization, "Content-Type": "application/json", ...init.headers } });
+  const text = await response.text();
+  let body: any = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
+  if (response.status === 401) {
+    throw new Error("Freshservice rejected the API key. Set FRESHSERVICE_API_KEY to an active agent API key.");
+  }
+  if (!response.ok) {
+    throw new Error(body.description || body.message || `Freshservice request failed (${response.status})`);
+  }
+  return body;
+}
+
+export async function createFreshserviceTicket(input: { email: string; subject: string; description: string; priority?: number }) {
+  if (hasFreshserviceConfig()) {
     try {
-      return await freshdeskRequest("/tickets", { method: "POST", body: JSON.stringify({ email: input.email, name: input.name, subject: input.subject, description: input.description, priority: input.priority || 1, status: 2, source: 2, tags: input.tags, ...(input.ccEmails?.length ? { cc_emails: input.ccEmails } : {}) }) });
+      return await freshserviceRequest("/tickets", {
+        method: "POST",
+        body: JSON.stringify({
+          email: input.email,
+          subject: input.subject,
+          description: input.description,
+          priority: input.priority || 1,
+          status: 2,
+        }),
+      });
     } catch (e) {
-      console.warn("Freshdesk ticket creation failed; persisting to local inbox store:", e instanceof Error ? e.message : e);
+      console.warn("Freshservice ticket creation notice:", e instanceof Error ? e.message : e);
+    }
+  }
+  return null;
+}
+
+export async function createFollowupTicket(input: {
+  email: string;
+  name: string;
+  subject: string;
+  description: string;
+  tags: string[];
+  priority?: number;
+  ccEmails?: string[];
+}) {
+  const cleanRequesterEmail = input.email.trim().toLowerCase();
+  const safeCc = (input.ccEmails || [])
+    .map(e => e.trim().toLowerCase())
+    .filter(e => e && e !== cleanRequesterEmail && /^\S+@\S+\.\S+$/.test(e));
+  const uniqueCc = Array.from(new Set(safeCc));
+
+  let freshdeskResult = null;
+
+  if (hasFreshdeskConfig()) {
+    const buildPayload = (includeCompany: boolean) => {
+      const companyVal = process.env.FRESHDESK_COMPANY_ID?.trim();
+      const numComp = companyVal && !isNaN(Number(companyVal)) ? Number(companyVal) : null;
+      return {
+        email: cleanRequesterEmail,
+        name: input.name.trim(),
+        subject: input.subject,
+        description: input.description,
+        priority: input.priority || 1,
+        status: 2,
+        source: 2,
+        tags: input.tags,
+        ...(uniqueCc.length ? { cc_emails: uniqueCc } : {}),
+        ...(includeCompany && numComp ? { company_id: numComp } : {}),
+      };
+    };
+
+    try {
+      // First attempt without forcing company_id to avoid "requester does not belong to specified company" errors
+      freshdeskResult = await freshdeskRequest("/tickets", {
+        method: "POST",
+        body: JSON.stringify(buildPayload(false)),
+      });
+    } catch (e) {
+      console.warn("Freshdesk ticket creation failed:", e instanceof Error ? e.message : e);
+      throw e;
     }
   }
 
-  // Fallback local ticket
+  // Also sync ticket record to Freshservice if configured
+  let freshserviceResult = null;
+  if (hasFreshserviceConfig()) {
+    freshserviceResult = await createFreshserviceTicket({
+      email: cleanRequesterEmail,
+      subject: input.subject,
+      description: input.description,
+      priority: input.priority || 1,
+    });
+  }
+
+  if (freshdeskResult) {
+    return { ...freshdeskResult, freshserviceTicketId: freshserviceResult?.ticket?.id || freshserviceResult?.id };
+  }
+
+  if (freshserviceResult) {
+    return { id: freshserviceResult.ticket?.id || freshserviceResult.id, simulated: false };
+  }
+
+  // Fallback local ticket if neither helpdesk is configured
   const newTicket: LocalTicket = {
     id: Math.floor(1000 + Math.random() * 9000),
     name: input.name,

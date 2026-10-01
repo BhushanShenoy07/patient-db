@@ -49,12 +49,27 @@ async function accessToken() {
 }
 
 export async function calendarRequest(method: string, eventId: string | null, event?: Record<string, unknown>) {
-  const calendarId = process.env.GOOGLE_CALENDAR_ID;
-  if (!calendarId) throw new Error("Configure GOOGLE_CALENDAR_ID on the server.");
+  const configuredId = process.env.GOOGLE_CALENDAR_ID?.trim() || "primary";
+  const calendarId =
+    (!configuredId || configuredId === "xxx" || (!configuredId.includes("@") && configuredId !== "primary"))
+      ? "primary"
+      : configuredId;
   const token = await accessToken();
-  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
-  const url = eventId ? `${base}/${encodeURIComponent(eventId)}` : base;
-  const response = await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(event ? { body: JSON.stringify(event) } : {}) });
+
+  const executeCall = async (targetCal: string) => {
+    const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCal)}/events`;
+    const url = eventId ? `${base}/${encodeURIComponent(eventId)}` : base;
+    return await fetch(url, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      ...(event ? { body: JSON.stringify(event) } : {}),
+    });
+  };
+
+  let response = await executeCall(calendarId);
+  if (response.status === 404 && calendarId !== "primary") {
+    response = await executeCall("primary");
+  }
   if (response.status === 204) return { ok: true };
   const body: any = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error?.message || `Google Calendar request failed (${response.status}).`);

@@ -753,6 +753,7 @@ export default function Home() {
             email: f[COL.email],
             doctor: appt.doctor,
             mode: appt.mode,
+            zoomUrl: fields[COL.zoomUrl] || "",
             existingEventId: priorCalendarId || "",
           });
           fields[COL.calendarId] = calendar.eventId || `cal_${Date.now()}`;
@@ -765,16 +766,24 @@ export default function Home() {
       const saved = await saveRecord(editingAppt, fields, clearZoomFields);
       setRecords(old => (editingAppt ? old.map(r => (r.id === saved.id ? saved : r)) : [saved, ...old]));
 
-      if (["scheduled", "cancelled"].includes(low(fields[COL.status]))) {
-        void sendAppointmentEmail({ ...saved, fields: { ...fields, ...saved.fields } });
+      let emailNotice = "";
+      if (["scheduled", "cancelled", "confirmed"].includes(low(fields[COL.status]))) {
+        try {
+          const emailResult = await sendAppointmentEmail({ ...saved, fields: { ...fields, ...saved.fields } });
+          if (emailResult?.ok) {
+            emailNotice = " Email confirmation dispatched to patient and physician via Freshdesk.";
+          }
+        } catch (mailErr) {
+          console.warn("Notice: could not dispatch Freshdesk notification:", mailErr);
+        }
       }
 
       setToast(
         editingAppt
-          ? "Appointment record updated in database."
+          ? `Appointment record updated in database.${emailNotice}`
           : appt.mode === "Online"
-          ? "Online Telehealth consultation scheduled and saved to database. Video conference room prepared."
-          : "In-person clinical appointment scheduled and saved to database."
+          ? `Online Telehealth consultation scheduled and saved to database. Video room prepared.${emailNotice}`
+          : `In-person clinical appointment scheduled and saved to database.${emailNotice}`
       );
 
       setSelectedDay(appt.date);
@@ -836,9 +845,16 @@ export default function Home() {
       };
       const clearFields = [COL.calendarId, COL.zoomId, COL.zoomUrl];
       const saved = await saveRecord(r.id, updatedFields, clearFields);
-      setRecords(old => old.map(item => item.id === saved.id ? saved : item));
-      void sendAppointmentEmail({ ...saved, fields: { ...updatedFields, ...saved.fields } });
-      setToast("Appointment marked as Cancelled in database.");
+      let cancelNotice = "";
+      try {
+        const mailRes = await sendAppointmentEmail({ ...saved, fields: { ...updatedFields, ...saved.fields } });
+        if (mailRes?.ok) {
+          cancelNotice = " Cancellation notices dispatched to patient & physician via Freshdesk.";
+        }
+      } catch (err) {
+        console.warn("Could not dispatch cancellation notice:", err);
+      }
+      setToast(`Appointment marked as Cancelled in database.${cancelNotice}`);
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Error cancelling appointment.");
     }
