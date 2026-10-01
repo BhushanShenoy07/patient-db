@@ -653,11 +653,17 @@ export default function Home() {
         [COL.gender]: patientForm.gender,
         [COL.status]: "Registered",
       };
-      const saved = await saveRecord(editingPatient, fields);
-      setRecords(old => (editingPatient ? old.map(r => (r.id === saved.id ? saved : r)) : [saved, ...old]));
+      const targetId = (editingPatient && !editingPatient.startsWith("patient:")) ? editingPatient : null;
+      const saved = await saveRecord(targetId, fields);
+      setRecords(old => {
+        if (!editingPatient) return [saved, ...old];
+        const exists = old.some(r => r.id === saved.id);
+        if (exists) return old.map(r => (r.id === saved.id ? saved : r));
+        return [saved, ...old];
+      });
       setPatientForm({ name: "", email: "", phone: "", bloodGroup: "", notes: "", age: "", gender: "Other" });
       setEditingPatient(null);
-      setToast(editingPatient ? "Patient record updated." : "New patient registered successfully.");
+      setToast(editingPatient ? "Patient record updated in database." : "New patient registered successfully in database.");
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Error saving patient record.");
     } finally {
@@ -755,7 +761,7 @@ export default function Home() {
         fields[COL.calendarId] = `cal_${Date.now()}`;
       }
 
-      const clearZoomFields = appt.mode === "Offline" || low(appt.status) === "cancelled" ? [COL.zoomId, COL.zoomUrl] : [];
+      const clearZoomFields = appt.mode === "Offline" || low(appt.status) === "cancelled" ? [COL.zoomId, COL.zoomUrl, COL.calendarId] : [];
       const saved = await saveRecord(editingAppt, fields, clearZoomFields);
       setRecords(old => (editingAppt ? old.map(r => (r.id === saved.id ? saved : r)) : [saved, ...old]));
 
@@ -765,10 +771,10 @@ export default function Home() {
 
       setToast(
         editingAppt
-          ? "Appointment record updated."
+          ? "Appointment record updated in database."
           : appt.mode === "Online"
-          ? "Online Telehealth consultation scheduled. Video conference room prepared."
-          : "In-person clinical appointment scheduled successfully."
+          ? "Online Telehealth consultation scheduled and saved to database. Video conference room prepared."
+          : "In-person clinical appointment scheduled and saved to database."
       );
 
       setSelectedDay(appt.date);
@@ -793,14 +799,27 @@ export default function Home() {
     try {
       await removeRecord(patient.id);
       setRecords(old => old.filter(r => r.id !== patient.id));
-      setToast("Patient record removed from directory.");
+      setToast("Patient record removed from database.");
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Error deleting patient.");
     }
   }
 
   async function deleteAppointment(r: RecordItem) {
-    if (!window.confirm(`Cancel and delete appointment for ${r.fields[COL.name]}?`)) return;
+    const isCancelled = low(r.fields[COL.status]) === "cancelled";
+    if (isCancelled) {
+      if (!window.confirm(`Permanently remove cancelled appointment record for ${r.fields[COL.name]} from database?`)) return;
+      try {
+        await removeRecord(r.id);
+        setRecords(old => old.filter(item => item.id !== r.id));
+        setToast("Appointment record removed from clinic database.");
+      } catch (e) {
+        setToast(e instanceof Error ? e.message : "Error deleting appointment.");
+      }
+      return;
+    }
+
+    if (!window.confirm(`Cancel scheduled consultation for ${r.fields[COL.name]}?`)) return;
     try {
       if (r.fields[COL.mode] === "Online" && r.fields[COL.zoomId]) {
         try { await zoomCall("DELETE", `/meetings/${r.fields[COL.zoomId]}`, "Online"); } catch { /* ignore */ }
@@ -808,11 +827,20 @@ export default function Home() {
       if (r.fields[COL.calendarId]) {
         try { await calendarCall({ action: "delete", existingEventId: r.fields[COL.calendarId] }); } catch { /* ignore */ }
       }
-      await removeRecord(r.id);
-      setRecords(old => old.filter(item => item.id !== r.id));
-      setToast("Appointment removed from clinic schedule.");
+      const updatedFields: Fields = {
+        ...r.fields,
+        [COL.status]: "Cancelled",
+        [COL.calendarId]: "",
+        [COL.zoomId]: "",
+        [COL.zoomUrl]: "",
+      };
+      const clearFields = [COL.calendarId, COL.zoomId, COL.zoomUrl];
+      const saved = await saveRecord(r.id, updatedFields, clearFields);
+      setRecords(old => old.map(item => item.id === saved.id ? saved : item));
+      void sendAppointmentEmail({ ...saved, fields: { ...updatedFields, ...saved.fields } });
+      setToast("Appointment marked as Cancelled in database.");
     } catch (e) {
-      setToast(e instanceof Error ? e.message : "Error deleting appointment.");
+      setToast(e instanceof Error ? e.message : "Error cancelling appointment.");
     }
   }
 
@@ -907,9 +935,13 @@ export default function Home() {
     try {
       const aRes = await fetch("/api/clinic/records");
       const aData = await aRes.json().catch(() => ({}));
-      results.airtable = `Operational (${(aData.records || []).length} Records Synced)`;
+      if (aRes.ok) {
+        results.airtable = `Operational (${(aData.records || []).length} Records Synced Live)`;
+      } else {
+        results.airtable = `Degraded (${aData.error || aRes.statusText})`;
+      }
     } catch {
-      results.airtable = "Operational (In-Memory Clinic Store)";
+      results.airtable = "Connection Failed";
     }
 
     const elapsed = Math.round(performance.now() - t0);
@@ -1475,7 +1507,7 @@ export default function Home() {
                               Edit
                             </button>
                             <button className="action-sub-btn btn-danger" onClick={() => void deleteAppointment(r)}>
-                              Cancel Visit
+                              {isCancelled ? "Delete Record" : "Cancel Visit"}
                             </button>
                           </div>
                         </div>

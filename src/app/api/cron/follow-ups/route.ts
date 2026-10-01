@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { airtableRequest, listAirtableRecords } from "@/lib/airtable";
+import { listAirtableRecords, saveAirtableRecord } from "@/lib/airtable";
 import { createFollowupTicket, createFollowupToken, escapeHtml, searchFollowupTickets } from "@/lib/followups";
 
 export const runtime = "nodejs";
@@ -36,7 +36,7 @@ async function run(request: Request) {
         const feedbackUrl = new URL("/patient-feedback", origin); feedbackUrl.searchParams.set("token", feedbackToken);
         await createFollowupTicket({ email, name, subject: `Clinic Desk · Day ${nextDay} health check for ${name}`, tags: ["clinic_followup", `appointment_${appointmentId}`, tag], description: `<p>Hello ${escapeHtml(name)},</p><p>This is your day ${nextDay} check-in after your visit with ${escapeHtml(doctor)}. We hope you are recovering well. Please share how you are feeling and rate your care. You can reply to this email or use the secure link below.</p><p><a href="${feedbackUrl.toString()}">Share your health update and rate your care</a></p><p>If your health has suddenly worsened or you need urgent help, contact your doctor or local emergency services now.</p><p>Warm regards,<br>Clinic Desk care team</p>` });
       }
-      await airtableRequest(`/${encodeURIComponent(appointmentId)}`, { method: "PATCH", body: JSON.stringify({ fields: { "Follow-up Start": startDay, "Follow-up Day": nextDay }, typecast: true }) });
+      await saveAirtableRecord(appointmentId, { "Follow-up Start": startDay, "Follow-up Day": nextDay });
       sent++;
     }
     return NextResponse.json({ ok: true, processed: records.length, sent });

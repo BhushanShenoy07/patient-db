@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readClinicSession } from "@/lib/auth";
 import { createFollowupTicket, createFollowupToken, escapeHtml } from "@/lib/followups";
-import { airtableRequest } from "@/lib/airtable";
+import { airtableRequest, saveAirtableRecord } from "@/lib/airtable";
 
 export const runtime = "nodejs";
 
@@ -20,8 +20,13 @@ export async function POST(request: Request) {
     if (session.role === "doctor" && doctor.toLowerCase() !== session.doctorName?.toLowerCase()) {
       return NextResponse.json({ error: "You can only follow up with patients from your own appointments." }, { status: 403 });
     }
-    const priorRecord = await airtableRequest(`/${encodeURIComponent(appointmentId)}`);
-    const existingDay = Number(priorRecord.fields?.["Follow-up Day"] || 0);
+    let priorRecord: any = null;
+    try {
+      priorRecord = await airtableRequest(`/${encodeURIComponent(appointmentId)}`);
+    } catch {
+      priorRecord = null;
+    }
+    const existingDay = Number(priorRecord?.fields?.["Follow-up Day"] || 0);
     if (existingDay >= 7) return NextResponse.json({ error: "The seven daily follow-up emails have already been sent." }, { status: 409 });
     const nextDay = existingDay + 1;
     const token = createFollowupToken({ name, email, doctor, appointmentId });
@@ -35,8 +40,8 @@ export async function POST(request: Request) {
       tags: ["clinic_followup", `appointment_${appointmentId}`, `appointment_${appointmentId}_day_${nextDay}`],
       description: `<p>Hello ${escapeHtml(name)},</p><p>This is your day ${nextDay} check-in after your visit with ${escapeHtml(doctor)}. We hope you are recovering well. Please share how you are feeling and rate your care. You can reply to this email or use the secure link below.</p><p><a href="${feedbackUrl.toString()}">Share your health update and rate your care</a></p><p>If your health has suddenly worsened or you need urgent help, contact your doctor or local emergency services now.</p><p>Warm regards,<br>Clinic Desk care team</p>`,
     });
-    const startDate = priorRecord.fields?.["Follow-up Start"] || new Date().toISOString().slice(0, 10);
-    await airtableRequest(`/${encodeURIComponent(appointmentId)}`, { method: "PATCH", body: JSON.stringify({ fields: { "Follow-up Start": startDate, "Follow-up Day": nextDay }, typecast: true }) });
+    const startDate = priorRecord?.fields?.["Follow-up Start"] || new Date().toISOString().slice(0, 10);
+    await saveAirtableRecord(appointmentId, { "Follow-up Start": startDate, "Follow-up Day": nextDay });
     return NextResponse.json({ ok: true, ticketId: ticket.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not send the patient follow-up.";

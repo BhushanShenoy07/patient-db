@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createFollowupTicket, escapeHtml, readAppointmentActionToken } from "@/lib/followups";
+import { saveAirtableRecord } from "@/lib/airtable";
 
 export const runtime = "nodejs";
 
@@ -35,6 +36,15 @@ export async function POST(request: Request) {
       priority: 2,
       description: `<p>${escapeHtml(token.name)} submitted an appointment ${escapeHtml(requestLabel)} request.</p><p><strong>Current appointment:</strong> ${escapeHtml(token.date)} at ${escapeHtml(token.time)} with ${escapeHtml(token.doctor)}.</p>${requestedTime ? `<p><strong>Requested new time:</strong> ${escapeHtml(requestedTime)}.</p>` : ""}<p>This request has been sent to the clinic team. The clinic will update its calendar and contact the patient to confirm.</p>`,
     });
+
+    if (token.appointmentId) {
+      if (action === "confirm") {
+        await saveAirtableRecord(token.appointmentId, { Status: "Confirmed" }).catch(e => console.warn("Airtable sync status warning:", e));
+      } else if (action === "cancel") {
+        await saveAirtableRecord(token.appointmentId, { Status: "Cancelled" }).catch(e => console.warn("Airtable sync status warning:", e));
+      }
+    }
+
     return NextResponse.json({ ok: true, action, ticketId: ticket.id, requestSubmitted: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not submit this appointment request.";

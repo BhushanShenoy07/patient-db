@@ -9,9 +9,19 @@ export async function GET(request: Request) {
   if (!session) return NextResponse.json({ error: "Sign in to view clinic records." }, { status: 401 });
   try {
     const records = await listAirtableRecords();
-    return NextResponse.json({ records: session.role === "doctor" ? records.filter((record: any) => String(record.fields?.Doctor || "").toLowerCase() === session.doctorName?.toLowerCase()) : records });
+    return NextResponse.json({
+      records: session.role === "doctor"
+        ? records.filter((record: any) => {
+            const doc = String(record.fields?.Doctor || "").toLowerCase();
+            const myDoc = session.doctorName?.toLowerCase() || "";
+            const isReg = String(record.fields?.Status || "").toLowerCase() === "registered" || !record.fields?.["Appointment Date"];
+            return doc === myDoc || isReg;
+          })
+        : records,
+    });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load Airtable records." }, { status: 502 });
   }
-  catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load Airtable records." }, { status: 502 }); }
 }
 
 export async function POST(request: Request) { return writeRecord(request, null); }
@@ -22,11 +32,16 @@ export async function PATCH(request: Request) {
 async function writeRecord(request: Request, id: string | null) {
   const session = readClinicSession(request);
   if (!session) return NextResponse.json({ error: "Sign in to update clinic records." }, { status: 401 });
-  if (session.role !== "receptionist") return NextResponse.json({ error: "Only receptionists can update clinic records." }, { status: 403 });
+  if (session.role !== "receptionist" && session.role !== "doctor") {
+    return NextResponse.json({ error: "Unauthorized to update clinic records." }, { status: 403 });
+  }
   try {
     const body = await request.json();
-    if (!body?.fields || typeof body.fields !== "object" || Array.isArray(body.fields)) return NextResponse.json({ error: "Record fields are required." }, { status: 400 });
-    if (id !== null && !/^rec[a-zA-Z0-9]+$/.test(id)) return NextResponse.json({ error: "Invalid Airtable record ID." }, { status: 400 });
+    if (!body?.fields || typeof body.fields !== "object" || Array.isArray(body.fields)) {
+      return NextResponse.json({ error: "Record fields are required." }, { status: 400 });
+    }
+    // Clean id: if id starts with 'patient:' or is not a standard Airtable ID, treat as null (new record)
+    const validRecordId = (id && /^rec[a-zA-Z0-9]+$/.test(id)) ? id : null;
     const fields = { ...body.fields };
     if (Array.isArray(body.clearFields)) {
       for (const field of body.clearFields) {
@@ -34,16 +49,24 @@ async function writeRecord(request: Request, id: string | null) {
         fields[field] = null;
       }
     }
-    return NextResponse.json(await saveAirtableRecord(id, fields));
-  } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not save Airtable record." }, { status: 502 }); }
+    return NextResponse.json(await saveAirtableRecord(validRecordId, fields));
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not save Airtable record." }, { status: 502 });
+  }
 }
 
 export async function DELETE(request: Request) {
   const session = readClinicSession(request);
   if (!session) return NextResponse.json({ error: "Sign in to delete clinic records." }, { status: 401 });
-  if (session.role !== "receptionist") return NextResponse.json({ error: "Only receptionists can delete clinic records." }, { status: 403 });
+  if (session.role !== "receptionist" && session.role !== "doctor") {
+    return NextResponse.json({ error: "Unauthorized to delete clinic records." }, { status: 403 });
+  }
   const id = new URL(request.url).searchParams.get("id") || "";
-  if (!/^rec[a-zA-Z0-9]+$/.test(id)) return NextResponse.json({ error: "Invalid Airtable record ID." }, { status: 400 });
-  try { await deleteAirtableRecord(id); return NextResponse.json({ ok: true }); }
-  catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not delete Airtable record." }, { status: 502 }); }
+  if (!id) return NextResponse.json({ error: "Record ID is required." }, { status: 400 });
+  try {
+    await deleteAirtableRecord(id);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not delete Airtable record." }, { status: 502 });
+  }
 }
