@@ -270,12 +270,12 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
     <main className="auth-container-shell">
       <form className="auth-panel-card" onSubmit={submit}>
         <div className="auth-brand-row">
-          <div className="brand-icon-box" style={{ background: "linear-gradient(135deg, #003b71 0%, #004b87 100%)" }}>
+          <div className="brand-icon-box">
             <IconCross size={18} />
           </div>
           <div>
-            <div className="brand-title" style={{ color: "#003b71", fontSize: "17px", fontWeight: 800 }}>KMC Hospital</div>
-            <div className="brand-subtitle">Kasturba Medical College · Manipal Health Desk</div>
+            <div className="brand-title">Clinic Desk</div>
+            <div className="brand-subtitle">Clinical Information Management</div>
           </div>
         </div>
 
@@ -291,13 +291,12 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
 
         {/* 1-Click Fast Demonstration Logins */}
         <div className="test-accounts-section">
-          <div className="test-accounts-title">Quick Demo Staff Accounts (1-Click)</div>
+          <div className="test-accounts-title">Quick Demo Staff Accounts</div>
           <div className="test-role-buttons">
             <button
               type="button"
               className="btn-test-account"
               disabled={busy}
-              style={{ borderColor: "var(--primary-line)", backgroundColor: "var(--primary-50)" }}
               onClick={() => {
                 setRole("doctor");
                 setEmail("bhushanshenoy07@gmail.com");
@@ -305,8 +304,8 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
                 void handleLogin("bhushanshenoy07@gmail.com", "bhushan@123", "doctor");
               }}
             >
-              <strong style={{ color: "var(--primary-700)" }}>Dr. Bhushan Shenoy (Doctor)</strong>
-              <small>Only His Consultations &amp; Messages</small>
+              <strong>Dr. Bhushan Shenoy</strong>
+              <small>Clinic Doctor</small>
             </button>
             <button
               type="button"
@@ -319,22 +318,8 @@ function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
                 void handleLogin("vrushali@gmail.com", "vrushali@123", "receptionist");
               }}
             >
-              <strong>Vrushali (Reception Desk)</strong>
-              <small>Full Clinic Portal Access</small>
-            </button>
-            <button
-              type="button"
-              className="btn-test-account"
-              disabled={busy}
-              onClick={() => {
-                setRole("doctor");
-                setEmail("doctor@clinic.com");
-                setPassword("doctor123");
-                void handleLogin("doctor@clinic.com", "doctor123", "doctor");
-              }}
-            >
-              <span>Dr. Ananya Rao</span>
-              <small>General Medicine (Doctor)</small>
+              <strong>Vrushali</strong>
+              <small>Reception Desk</small>
             </button>
           </div>
         </div>
@@ -1105,9 +1090,9 @@ export default function Home() {
             <IconCross size={18} />
           </div>
           <div>
-            <div className="brand-title">KMC Hospital · Manipal Health Desk</div>
+            <div className="brand-title">Clinic Desk</div>
             <div className="brand-subtitle">
-              {isDoctorRole ? `Clinical Chamber · ${user.doctorName || user.name}` : "Clinical Information & Patient Care"}
+              {isDoctorRole ? `Doctor Portal · ${user.doctorName || user.name}` : "Clinical Information Management"}
             </div>
           </div>
         </div>
@@ -1188,144 +1173,62 @@ export default function Home() {
       </header>
 
       {/* OVERVIEW BAR */}
-      {isDoctorRole ? (
-        <section className="overview-bar" style={{ padding: 0, background: "transparent", border: "none", boxShadow: "none" }}>
-          <div className="doctor-chamber-banner">
-            <div className="doctor-chamber-info">
-              <div className="doctor-avatar-badge">
-                {(user.doctorName || "Dr").replace(/^Dr\.?\s*/i, "").slice(0, 2).toUpperCase()}
-                <span className="doctor-active-pip" title="Active on Duty" />
-              </div>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
-                  <h1 className="doctor-chamber-title">{user.doctorName || user.name}</h1>
-                  <span className="kmc-department-tag">Consultant Physician · Internal Medicine</span>
-                  <span className="kmc-room-tag">OPD Chamber 204</span>
-                </div>
-                <div className="doctor-chamber-sub">
-                  KMC Hospital Mangalore · Clinical Department · Attending Physician Schedule · {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })}
-                </div>
-              </div>
-            </div>
-
-            <div className="kpi-metrics-row">
-              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
-                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
-                  <IconCalendar size={12} />
-                  <span>My Consultations</span>
-                </div>
-                <div className="kpi-number" style={{ color: "#ffffff" }}>{appointments.length}</div>
-              </div>
-              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
-                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
-                  <IconClock size={12} />
-                  <span>Today's Queue</span>
-                </div>
-                <div className="kpi-number" style={{ color: "#ffffff" }}>{todayAppointments.length}</div>
-              </div>
-              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
-                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
-                  <IconVideo size={12} />
-                  <span>Telehealth</span>
-                </div>
-                <div className="kpi-number" style={{ color: "#ffffff" }}>{onlineUpcoming.length}</div>
-              </div>
-              <div className="kpi-metric-box" style={{ background: "rgba(255,255,255,0.12)", borderColor: "rgba(255,255,255,0.25)" }}>
-                <div className="kpi-label" style={{ color: "rgba(255,255,255,0.85)" }}>
-                  <IconInbox size={12} />
-                  <span>Care Messages</span>
-                </div>
-                <div className="kpi-number" style={{ color: "#ffffff" }}>{followupUpdates.length}</div>
-              </div>
-            </div>
+      <section className="overview-bar">
+        <div className="overview-content-row">
+          <div className="overview-title-block">
+            <h1>{isDoctorRole ? `${user.doctorName || user.name} · Consultations` : "Clinical Operations Overview"}</h1>
+            <p>
+              {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })} · {isDoctorRole ? `Doctor Chamber · ${user.doctorName || user.name}` : `Logged in as ${user.name} (${user.role})`}
+            </p>
           </div>
 
-          {/* ACTION SUBBAR FOR DOCTOR */}
-          <div className="action-subbar" style={{ marginTop: 10 }}>
-            <div className="action-btn-cluster">
-              <button
-                className="btn-primary"
-                onClick={() => {
-                  setTab("appointments");
-                  setEditingAppt(null);
-                  setAppt({ patient: "", doctor: user.doctorName || "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
-                }}
-              >
-                <IconCross size={13} />
-                <span>Schedule Consultation</span>
-              </button>
-              <button className="btn-secondary" onClick={exportCSV}>
-                <IconDownload size={13} />
-                <span>Export My Schedule</span>
-              </button>
-              <button className="btn-secondary" onClick={() => window.print()}>
-                <IconPrinter size={13} />
-                <span>Print Daily Roster</span>
-              </button>
+          <div className="kpi-metrics-row">
+            <div className="kpi-metric-box">
+              <div className="kpi-label">
+                <IconCalendar size={12} />
+                <span>{isDoctorRole ? "My Consultations" : "Patients"}</span>
+              </div>
+              <div className="kpi-number">{isDoctorRole ? appointments.length : patients.length}</div>
             </div>
+            <div className="kpi-metric-box">
+              <div className="kpi-label">
+                <IconClock size={12} />
+                <span>Today's Visits</span>
+              </div>
+              <div className="kpi-number">{todayAppointments.length}</div>
+            </div>
+            <div className="kpi-metric-box">
+              <div className="kpi-label">
+                <IconVideo size={12} />
+                <span>Telehealth</span>
+              </div>
+              <div className="kpi-number">{onlineUpcoming.length}</div>
+            </div>
+            <div className="kpi-metric-box">
+              <div className="kpi-label">
+                <IconInbox size={12} />
+                <span>Care Messages</span>
+              </div>
+              <div className="kpi-number">{followupUpdates.length}</div>
+            </div>
+          </div>
+        </div>
 
-            <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
-              <IconRefresh size={12} />
-              <span>{busy ? "Refreshing…" : "Sync"}</span>
+        {/* ACTION SUBBAR */}
+        <div className="action-subbar">
+          <div className="action-btn-cluster">
+            <button
+              className="btn-primary"
+              onClick={() => {
+                setTab("appointments");
+                setEditingAppt(null);
+                setAppt({ patient: "", doctor: isDoctorRole ? (user.doctorName || "") : "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
+              }}
+            >
+              <IconCross size={13} />
+              <span>{isDoctorRole ? "New Consultation" : "Book Appointment"}</span>
             </button>
-          </div>
-        </section>
-      ) : (
-        <section className="overview-bar">
-          <div className="overview-content-row">
-            <div className="overview-title-block">
-              <h1>Clinical Operations Overview</h1>
-              <p>
-                {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })} · Logged in as {user.doctorName || user.name} ({user.role})
-              </p>
-            </div>
-
-            <div className="kpi-metrics-row">
-              <div className="kpi-metric-box">
-                <div className="kpi-label">
-                  <IconUsers size={12} />
-                  <span>Patients</span>
-                </div>
-                <div className="kpi-number">{patients.length}</div>
-              </div>
-              <div className="kpi-metric-box">
-                <div className="kpi-label">
-                  <IconCalendar size={12} />
-                  <span>Today's Visits</span>
-                </div>
-                <div className="kpi-number">{todayAppointments.length}</div>
-              </div>
-              <div className="kpi-metric-box">
-                <div className="kpi-label">
-                  <IconVideo size={12} />
-                  <span>Telehealth</span>
-                </div>
-                <div className="kpi-number">{onlineUpcoming.length}</div>
-              </div>
-              <div className="kpi-metric-box">
-                <div className="kpi-label">
-                  <IconInbox size={12} />
-                  <span>Care Inbox</span>
-                </div>
-                <div className="kpi-number">{followupUpdates.length}</div>
-              </div>
-            </div>
-          </div>
-
-          {/* ACTION SUBBAR */}
-          <div className="action-subbar">
-            <div className="action-btn-cluster">
-              <button
-                className="btn-primary"
-                onClick={() => {
-                  setTab("appointments");
-                  setEditingAppt(null);
-                  setAppt({ patient: "", doctor: "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
-                }}
-              >
-                <IconCross size={13} />
-                <span>Book Appointment</span>
-              </button>
+            {!isDoctorRole && (
               <button
                 className="btn-secondary"
                 onClick={() => {
@@ -1337,23 +1240,23 @@ export default function Home() {
                 <IconUsers size={13} />
                 <span>Register Patient</span>
               </button>
-              <button className="btn-secondary" onClick={exportCSV}>
-                <IconDownload size={13} />
-                <span>Export CSV</span>
-              </button>
-              <button className="btn-secondary" onClick={() => window.print()}>
-                <IconPrinter size={13} />
-                <span>Print Schedule</span>
-              </button>
-            </div>
-
-            <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
-              <IconRefresh size={12} />
-              <span>{busy ? "Refreshing…" : "Sync"}</span>
+            )}
+            <button className="btn-secondary" onClick={exportCSV}>
+              <IconDownload size={13} />
+              <span>Export CSV</span>
+            </button>
+            <button className="btn-secondary" onClick={() => window.print()}>
+              <IconPrinter size={13} />
+              <span>Print Schedule</span>
             </button>
           </div>
-        </section>
-      )}
+
+          <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
+            <IconRefresh size={12} />
+            <span>{busy ? "Refreshing…" : "Sync"}</span>
+          </button>
+        </div>
+      </section>
 
       {/* WORKSPACE CONTENT */}
       <main className="main-workspace-container">
@@ -2199,8 +2102,8 @@ export default function Home() {
             {isDoctorRole ? (
               <div
                 style={{
-                  backgroundColor: "var(--kmc-blue-50)",
-                  border: "1px solid var(--kmc-blue-line)",
+                  backgroundColor: "var(--primary-50)",
+                  border: "1px solid var(--primary-line)",
                   borderRadius: "8px",
                   padding: "12px 16px",
                   margin: "12px 0 16px 0",
@@ -2208,7 +2111,7 @@ export default function Home() {
                   alignItems: "flex-start",
                   gap: "10px",
                   fontSize: "12.5px",
-                  color: "var(--kmc-blue)",
+                  color: "var(--primary-700)",
                   lineHeight: "1.5",
                 }}
               >
@@ -2216,7 +2119,7 @@ export default function Home() {
                   <IconInbox size={15} />
                 </div>
                 <div>
-                  <strong>Doctor Consultation Inbox:</strong> Showing only patient inquiries and follow-up communications linked to your appointments with <strong>{user.doctorName}</strong>. Replies sent here are directly delivered to the patient via Freshdesk, keeping clinical records synchronized with the hospital.
+                  <strong>Doctor Consultation Inbox:</strong> Showing only patient inquiries and communications linked to your appointments with <strong>{user.doctorName}</strong>. You can review conversations and dispatch clinical responses directly below.
                 </div>
               </div>
             ) : (
