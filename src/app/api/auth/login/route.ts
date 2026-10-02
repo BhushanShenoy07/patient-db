@@ -22,7 +22,16 @@ export async function POST(request: Request) {
     if (!account) return NextResponse.json({ error: "Email or password is incorrect." }, { status: 401 });
     if (account.role !== body.role) return NextResponse.json({ error: `This account is registered as a ${account.role}. Choose that role to continue.` }, { status: 403 });
 
-    const response = NextResponse.json({ user: { email: account.email, name: account.name, role: account.role, doctorName: account.doctorName } });
+    const response = NextResponse.json({
+      user: {
+        email: account.email,
+        name: account.name,
+        role: account.role,
+        doctorName: account.doctorName,
+        specialization: account.specialization,
+        artUsername: account.artUsername,
+      },
+    });
     response.cookies.set(SESSION_COOKIE, createSessionToken(account), {
       httpOnly: true,
       sameSite: "lax",

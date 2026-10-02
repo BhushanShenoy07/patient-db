@@ -5,7 +5,18 @@ export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   const user = readClinicSession(request);
-  return NextResponse.json({ user: user ? { email: user.email, name: user.name, role: user.role, doctorName: user.doctorName } : null });
+  return NextResponse.json({
+    user: user
+      ? {
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          doctorName: user.doctorName,
+          specialization: user.specialization,
+          artUsername: user.artUsername,
+        }
+      : null,
+  });
 }
 
 export async function DELETE() {

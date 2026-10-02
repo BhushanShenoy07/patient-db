@@ -1,11 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import {
+  artStatus as readArtStatus,
+  checkUser,
+  connectArt,
+  disconnectArt,
+  onArtEvent,
+  onPresence,
+  sendToUser,
+  watchUsers,
+} from "@/lib/art-client";
 
 type Fields = Record<string, string>;
 type RecordItem = { id: string; fields: Fields };
-type ClinicUser = { email: string; name: string; role: "doctor" | "receptionist"; doctorName?: string };
+type ClinicUser = {
+  email: string;
+  name: string;
+  role: "doctor" | "receptionist";
+  doctorName?: string;
+  specialization?: string;
+  artUsername?: string;
+};
 type FollowupConversation = {
   id: string;
   incoming: boolean;
@@ -28,7 +45,25 @@ type FollowupUpdate = {
   hasReplies?: boolean;
   conversations?: FollowupConversation[];
 };
-type DoctorOption = { name: string; specialization: string; email: string };
+type DoctorOption = { name: string; specialization: string; email: string; artUsername?: string };
+type ArtMessage = {
+  id: string;
+  at: string;
+  direction: "in" | "out";
+  peer: string;
+  event: string;
+  content: Record<string, any>;
+  status?: "sending" | "delivered" | "failed";
+  reason?: string;
+  read: boolean;
+};
+type Person = {
+  name: string;
+  role: "doctor" | "receptionist";
+  specialization?: string;
+  artUsername: string;
+};
+const CHAT_EVENT = "clinic_message";
 
 const COL = {
   name: "Patient Name",
@@ -235,6 +270,329 @@ function IconSend({ size = 13 }: { size?: number }) {
   );
 }
 
+function IconMessageChat({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+const initials = (name: string) =>
+  name.replace(/^dr\.?\s*/i, "").split(/\s+/).map(w => w[0] || "").join("").slice(0, 2).toUpperCase() || "?";
+
+const timeLabel = (iso: string) => {
+  try {
+    return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+};
+
+const dayLabel = (iso: string) => {
+  try {
+    const d = new Date(iso), today = new Date();
+    const y = new Date();
+    y.setDate(today.getDate() - 1);
+    return d.toDateString() === today.toDateString()
+      ? "Today"
+      : d.toDateString() === y.toDateString()
+        ? "Yesterday"
+        : d.toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
+  } catch {
+    return "";
+  }
+};
+
+function Avatar({ person, online, large }: { person: Person; online?: boolean; large?: boolean }) {
+  return (
+    <div className={`chat-avatar-container ${person.role === "receptionist" ? "receptionist" : ""} ${large ? "large" : ""}`}>
+      {initials(person.name)}
+      {online && <span className="chat-online-indicator" title="Online" aria-label="Online" />}
+    </div>
+  );
+}
+
+const messageText = (m: ArtMessage) =>
+  m.event === CHAT_EVENT
+    ? String(m.content.text || "")
+    : `Appointment · ${String(m.content.name || "Patient")} · ${String(m.content.date || "")} ${String(m.content.time || "")}`;
+
+function ChatPanel({
+  messages,
+  status,
+  people,
+  online,
+  presence,
+  activePeer,
+  onSelect,
+  onSend,
+  onRetry,
+  onReconnect,
+}: {
+  messages: ArtMessage[];
+  status: string;
+  people: Person[];
+  online: Set<string>;
+  presence: boolean;
+  activePeer: string;
+  onSelect: (username: string) => void;
+  onSend: (to: string, text: string) => void;
+  onRetry: (m: ArtMessage) => void;
+  onReconnect: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [filter, setFilter] = useState("");
+  const threadEnd = useRef<HTMLDivElement>(null);
+  const connected = status.startsWith("connected");
+  const peer = people.find(p => p.artUsername.toLowerCase() === activePeer.toLowerCase());
+  const thread = messages.filter(m => m.peer.toLowerCase() === activePeer.toLowerCase()).slice().reverse();
+
+  useEffect(() => {
+    threadEnd.current?.scrollIntoView({ block: "end" });
+  }, [thread.length, activePeer]);
+
+  const conversations = people
+    .filter(p =>
+      `${p.name} ${p.specialization || ""} ${p.artUsername}`
+        .toLowerCase()
+        .includes(filter.trim().toLowerCase())
+    )
+    .map(p => {
+      const own = messages.filter(m => m.peer.toLowerCase() === p.artUsername.toLowerCase());
+      return {
+        person: p,
+        last: own[0],
+        unread: own.filter(m => !m.read).length,
+      };
+    })
+    .sort((a, b) =>
+      (b.last?.at || "").localeCompare(a.last?.at || "") ||
+      Number(online.has(b.person.artUsername.toLowerCase())) - Number(online.has(a.person.artUsername.toLowerCase())) ||
+      a.person.name.localeCompare(b.person.name)
+    );
+
+  function send() {
+    const text = draft.trim();
+    if (!text || !activePeer || !connected) return;
+    onSend(activePeer, text);
+    setDraft("");
+  }
+
+  return (
+    <div className="chat-panel-wrapper">
+      <aside className="chat-sidebar">
+        <div className="chat-sidebar-header">
+          <div>
+            <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--primary-600)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              ADK LIVE CONNECT
+            </div>
+            <div style={{ fontSize: "15px", fontWeight: 800, color: "var(--ink-900)", marginTop: "2px" }}>
+              Staff Chat
+            </div>
+          </div>
+          <span
+            className={`chat-status-badge ${connected ? "online" : status === "connecting" ? "pending" : "offline"}`}
+            title={status}
+          >
+            {connected ? "Live" : status === "connecting" ? "Connecting…" : "Offline"}
+          </span>
+        </div>
+
+        {!connected && status !== "connecting" && (
+          <div style={{ margin: "10px 14px", padding: "10px 12px", borderRadius: "8px", backgroundColor: "#fef2f2", border: "1px solid #fecaca", fontSize: "11.5px", color: "#b91c1c", display: "flex", flexDirection: "column", gap: "6px" }}>
+            <span>{status.replace(/^offline:\s*/, "") || "Not connected to ADK Live Connect."}</span>
+            <button
+              style={{ alignSelf: "flex-start", padding: "3px 9px", background: "#ffffff", border: "1px solid #fecaca", borderRadius: "5px", color: "#b91c1c", fontSize: "11px", fontWeight: 700, cursor: "pointer" }}
+              onClick={onReconnect}
+            >
+              Reconnect
+            </button>
+          </div>
+        )}
+
+        <div className="chat-search-bar">
+          <input
+            className="chat-search-input"
+            placeholder="Search physicians or staff…"
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+          />
+        </div>
+
+        <div className="chat-contacts-scroll">
+          {conversations.map(({ person, last, unread }) => {
+            const isPeerOnline = online.has(person.artUsername.toLowerCase());
+            const isActive = person.artUsername.toLowerCase() === activePeer.toLowerCase();
+            return (
+              <button
+                key={person.artUsername}
+                className={`chat-contact-btn ${isActive ? "active" : ""}`}
+                onClick={() => onSelect(person.artUsername)}
+              >
+                <Avatar person={person} online={isPeerOnline} />
+                <div className="chat-contact-info">
+                  <div className="chat-contact-top-row">
+                    <span className="chat-contact-name">{person.name}</span>
+                    {last && <span className="chat-contact-time">{timeLabel(last.at)}</span>}
+                  </div>
+                  <div className="chat-contact-bottom-row">
+                    <span className="chat-contact-preview">
+                      {last
+                        ? `${last.direction === "out" ? "You: " : ""}${messageText(last)}`
+                        : person.role === "doctor"
+                          ? person.specialization || "Physician"
+                          : "Front Desk Staff"}
+                    </span>
+                    {unread > 0 && <span className="chat-unread-badge">{unread}</span>}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+          {!conversations.length && (
+            <div style={{ padding: "24px 16px", textAlign: "center", fontSize: "12px", color: "var(--ink-500)" }}>
+              No staff members found.
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <div className="chat-main-pane">
+        {peer ? (
+          <>
+            <header className="chat-thread-header">
+              <div className="chat-peer-details">
+                <Avatar person={peer} online={online.has(peer.artUsername.toLowerCase())} />
+                <div>
+                  <div className="chat-peer-name">{peer.name}</div>
+                  <div className="chat-peer-meta">
+                    <span>{peer.role === "doctor" ? peer.specialization || "Doctor" : "Front Desk Receptionist"}</span>
+                    <span>·</span>
+                    <span>@{peer.artUsername}</span>
+                    <span>·</span>
+                    {online.has(peer.artUsername.toLowerCase()) ? (
+                      <span className="chat-peer-online-tag">Online now</span>
+                    ) : (
+                      <span>Offline</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </header>
+
+            <div className="chat-messages-area">
+              {thread.map((m, i) => {
+                const showDay = i === 0 || dayLabel(thread[i - 1].at) !== dayLabel(m.at);
+                const isOut = m.direction === "out";
+                return (
+                  <div key={m.id}>
+                    {showDay && (
+                      <div className="chat-day-divider">
+                        <span>{dayLabel(m.at)}</span>
+                      </div>
+                    )}
+                    <div className={`chat-message-row ${isOut ? "outgoing" : "incoming"}`}>
+                      <div className={`chat-bubble-card ${m.status === "failed" ? "failed" : ""}`}>
+                        {m.event === CHAT_EVENT ? (
+                          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                            {String(m.content.text || "")}
+                          </div>
+                        ) : (
+                          <div className="chat-appt-card-block">
+                            <span className="chat-appt-card-badge">APPOINTMENT ALERT</span>
+                            <span className="chat-appt-patient-name">{String(m.content.name || "Patient Consultation")}</span>
+                            <span className="chat-appt-details">
+                              {String(m.content.date || "")} · {String(m.content.time || "")} · {String(m.content.mode || "")}
+                            </span>
+                            {m.content.phone ? (
+                              <span className="chat-appt-details">Phone: {String(m.content.phone)}</span>
+                            ) : null}
+                          </div>
+                        )}
+                        <span className="chat-bubble-meta">
+                          {timeLabel(m.at)}
+                          {isOut && (
+                            <>
+                              {" · "}
+                              {m.status === "sending" ? "Sending…" : m.status === "failed" ? "Not delivered" : "Delivered"}
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                    {m.status === "failed" && (
+                      <div className="chat-send-error">
+                        <span>{m.reason || "Delivery failed"}</span>
+                        <button onClick={() => onRetry(m)}>Retry</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {!thread.length && (
+                <div className="chat-empty-thread">
+                  <Avatar person={peer} online={online.has(peer.artUsername.toLowerCase())} large />
+                  <strong>Direct Chat with {peer.name}</strong>
+                  <p style={{ margin: 0, fontSize: "12.5px" }}>
+                    Send real-time instant messages and live appointment updates over ADK Live Connect.
+                  </p>
+                </div>
+              )}
+              <div ref={threadEnd} />
+            </div>
+
+            <form
+              className="chat-input-bar"
+              onSubmit={e => {
+                e.preventDefault();
+                send();
+              }}
+            >
+              <textarea
+                className="chat-input-textarea"
+                rows={1}
+                value={draft}
+                disabled={!connected}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send();
+                  }
+                }}
+                placeholder={
+                  connected
+                    ? `Message ${peer.name}… (Press Enter to send)`
+                    : "Connecting to ADK Live Connect to enable messaging…"
+                }
+              />
+              <button
+                type="submit"
+                className="chat-send-btn"
+                disabled={!connected || !draft.trim()}
+              >
+                <IconSend size={13} />
+                <span>Send</span>
+              </button>
+            </form>
+          </>
+        ) : (
+          <div className="chat-empty-thread">
+            <div style={{ width: "56px", height: "56px", borderRadius: "50%", background: "var(--primary-50)", color: "var(--primary-600)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <IconMessageChat size={26} />
+            </div>
+            <strong>Select a Staff Conversation</strong>
+            <p style={{ margin: 0, fontSize: "12.5px", maxWidth: "340px" }}>
+              Select a physician or receptionist from the roster on the left to start a real-time messaging session.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LoginScreen({ onLogin }: { onLogin: (user: ClinicUser) => void }) {
   const [role, setRole] = useState<"doctor" | "receptionist">("receptionist");
   const [email, setEmail] = useState("");
@@ -395,7 +753,7 @@ export default function Home() {
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [user, setUser] = useState<ClinicUser | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
-  const [tab, setTab] = useState<"appointments" | "patients" | "doctors" | "followups" | "analytics">("appointments");
+  const [tab, setTab] = useState<"appointments" | "patients" | "doctors" | "followups" | "messages" | "analytics">("appointments");
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -428,6 +786,135 @@ export default function Home() {
   const [month, setMonth] = useState(() => new Date());
   const [selectedDay, setSelectedDay] = useState(isoDate());
   const [doctorFilter, setDoctorFilter] = useState("");
+
+  // ADK Live Connect state
+  const [artMessages, setArtMessages] = useState<ArtMessage[]>([]);
+  const [people, setPeople] = useState<Person[]>([]);
+  const [activePeer, setActivePeer] = useState("");
+  const activePeerRef = useRef("");
+  const [onlineUsers, setOnlineUsers] = useState<Set<string>>(new Set());
+  const [presenceOn, setPresenceOn] = useState(false);
+  const [artStatus, setArtStatus] = useState("idle");
+
+  const addMessage = (m: Omit<ArtMessage, "at">) =>
+    setArtMessages(old =>
+      old.some(x => x.id === m.id) ? old : [{ ...m, at: new Date().toISOString() }, ...old].slice(0, 300)
+    );
+
+  const updateMessage = (id: string, patch: Partial<ArtMessage>) =>
+    setArtMessages(old => old.map(m => (m.id === id ? { ...m, ...patch } : m)));
+
+  async function startArt() {
+    setArtStatus("connecting");
+    try {
+      await connectArt();
+      const info = await readArtStatus();
+      setArtStatus(`connected as ${info.username}`);
+    } catch (error) {
+      setArtStatus(`offline: ${error instanceof Error ? error.message : "could not connect"}`);
+    }
+  }
+
+  async function deliver(m: ArtMessage) {
+    updateMessage(m.id, { status: "sending", reason: undefined });
+    try {
+      const result = await sendToUser(m.peer, { ...m.content, id: m.id }, m.event === CHAT_EVENT ? CHAT_EVENT : undefined);
+      updateMessage(m.id, result.delivered ? { status: "delivered" } : { status: "failed", reason: result.reason });
+      return result;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Could not send.";
+      updateMessage(m.id, { status: "failed", reason });
+      return { delivered: false as const, reason };
+    }
+  }
+
+  async function sendChat(to: string, text: string) {
+    let self = user?.artUsername || "";
+    try {
+      self = (await readArtStatus()).username;
+    } catch {
+      // fallback
+    }
+    const m: ArtMessage = {
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      direction: "out",
+      peer: to,
+      event: CHAT_EVENT,
+      content: { text, from: self, fromName: user?.doctorName || user?.name },
+      status: "sending",
+      read: true,
+    };
+    addMessage(m);
+    await deliver(m);
+  }
+
+  function selectPeer(username: string) {
+    setActivePeer(username);
+    activePeerRef.current = username;
+    checkUser(username);
+    setArtMessages(old =>
+      old.some(m => m.peer.toLowerCase() === username.toLowerCase() && !m.read)
+        ? old.map(m => (m.peer.toLowerCase() === username.toLowerCase() ? { ...m, read: true } : m))
+        : old
+    );
+  }
+
+  async function notifyByArt(payload: Fields) {
+    const doctor = doctorOptions.find(d => doctorKey(d.name) === doctorKey(payload.doctor));
+    const person = people.find(p => p.role === "doctor" && doctorKey(p.name) === doctorKey(payload.doctor));
+    const artUsername = doctor?.artUsername || person?.artUsername;
+    if (!artUsername) {
+      throw new Error(`${payload.doctor} has no active clinic account for ADK Live Connect.`);
+    }
+    let self = user?.artUsername || "";
+    try {
+      self = (await readArtStatus()).username;
+    } catch {
+      // fallback
+    }
+    const m: ArtMessage = {
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      direction: "out",
+      peer: artUsername,
+      event: "appointment",
+      content: {
+        ...payload,
+        doctor: payload.doctor,
+        from: self,
+        fromName: user?.doctorName || user?.name,
+      },
+      status: "sending",
+      read: true,
+    };
+    addMessage(m);
+    const result = await deliver(m);
+    if (!result.delivered) {
+      throw new Error(`Notification not delivered to ${payload.doctor}: ${result.reason}`);
+    }
+  }
+
+  async function sendAppointmentMessage(record: RecordItem) {
+    const fields = record.fields;
+    setSendingMessageFor(record.id);
+    try {
+      await notifyByArt({
+        name: fields[COL.name],
+        email: fields[COL.email] || "",
+        phone: fields[COL.phone] || "",
+        doctor: fields[COL.doctor] || "",
+        date: fields[COL.date] || "",
+        time: fields[COL.time] || "",
+        mode: modeOf(fields),
+      });
+      setToast(`ADK appointment alert transmitted to ${fields[COL.doctor]}.`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Could not send ADK notification.");
+    } finally {
+      setSendingMessageFor(null);
+    }
+  }
 
   useEffect(() => {
     fetch("/api/auth/session")
@@ -471,7 +958,48 @@ export default function Home() {
   }, [user]);
 
   useEffect(() => {
-    if (user?.role === "doctor" && tab !== "appointments" && tab !== "followups") {
+    if (!user) return;
+    void fetch("/api/clinic/directory")
+      .then(r => r.json())
+      .then(body => {
+        if (Array.isArray(body.people)) {
+          setPeople(body.people);
+        }
+      })
+      .catch(() => setPeople([]));
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const off = onArtEvent(({ event, content }) => {
+      addMessage({
+        id: typeof content?.id === "string" ? content.id : crypto.randomUUID(),
+        direction: "in",
+        peer: String(content?.from || ""),
+        event,
+        content: content || {},
+        read: String(content?.from || "").toLowerCase() === activePeerRef.current.toLowerCase(),
+      });
+    });
+    const offPresence = onPresence(online => {
+      setOnlineUsers(online);
+      setPresenceOn(true);
+    });
+    void startArt();
+    return () => {
+      off();
+      offPresence();
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (people.length && artStatus.startsWith("connected")) {
+      void watchUsers(people.map(p => p.artUsername));
+    }
+  }, [people, artStatus]);
+
+  useEffect(() => {
+    if (user?.role === "doctor" && tab !== "appointments" && tab !== "followups" && tab !== "messages") {
       setTab("appointments");
     }
   }, [user, tab]);
@@ -1058,9 +1586,11 @@ export default function Home() {
   }
 
   async function signOut() {
+    await disconnectArt().catch(() => {});
     await fetch("/api/auth/session", { method: "DELETE" });
     setUser(null);
     setRecords([]);
+    window.location.reload();
   }
 
   if (sessionLoading) {
@@ -1080,6 +1610,7 @@ export default function Home() {
   if (!user) return <LoginScreen onLogin={setUser} />;
 
   const isDoctorRole = user.role === "doctor";
+  const unreadArtCount = artMessages.filter(m => !m.read && m.direction === "in").length;
 
   return (
     <>
@@ -1139,6 +1670,20 @@ export default function Home() {
             <IconInbox size={13} />
             <span>{isDoctorRole ? "My Care Messages" : "Messages & Inbox"}</span>
             <span className="nav-count-badge">{followupUpdates.length}</span>
+          </button>
+          <button
+            className={`nav-item-btn ${tab === "messages" ? "active" : ""}`}
+            onClick={() => setTab("messages")}
+          >
+            <IconMessageChat size={13} />
+            <span>{isDoctorRole ? "Staff Chat (ADK)" : "Live Staff Chat (ADK)"}</span>
+            {unreadArtCount > 0 ? (
+              <span className="nav-count-badge" style={{ backgroundColor: "var(--primary-600)", color: "#ffffff" }}>
+                {unreadArtCount}
+              </span>
+            ) : artStatus.startsWith("connected") ? (
+              <span className="nav-count-badge" style={{ backgroundColor: "#10b981", color: "#ffffff", padding: "0 6px" }}>Live</span>
+            ) : null}
           </button>
           {!isDoctorRole && (
             <button
@@ -1645,6 +2190,15 @@ export default function Home() {
                               disabled={sendingMessageFor === r.id}
                             >
                               {sendingMessageFor === r.id ? "Sending…" : "Send Email Reminder"}
+                            </button>
+                            <button
+                              className="action-sub-btn"
+                              style={{ backgroundColor: "var(--primary-50)", color: "var(--primary-700)", borderColor: "var(--primary-line)" }}
+                              onClick={() => void sendAppointmentMessage(r)}
+                              disabled={sendingMessageFor === r.id}
+                              title="Transmit instant appointment card to doctor's ADK Live Connect"
+                            >
+                              {sendingMessageFor === r.id ? "Alerting…" : "Notify Doctor (ADK)"}
                             </button>
                             <button className="action-sub-btn" onClick={() => editAppointment(r)}>
                               Edit
@@ -2471,7 +3025,25 @@ export default function Home() {
           </div>
         )}
 
-        {/* TAB 5: ANALYTICS */}
+        {/* TAB 5: STAFF CHAT (ADK LIVE CONNECT) */}
+        {tab === "messages" && (
+          <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
+            <ChatPanel
+              messages={artMessages}
+              status={artStatus}
+              people={people}
+              online={onlineUsers}
+              presence={presenceOn}
+              activePeer={activePeer}
+              onSelect={selectPeer}
+              onSend={(to, text) => void sendChat(to, text)}
+              onRetry={m => void deliver(m)}
+              onReconnect={() => void startArt()}
+            />
+          </div>
+        )}
+
+        {/* TAB 6: ANALYTICS */}
         {tab === "analytics" && (
           <div className="card-panel">
             <div className="panel-header-line">
@@ -2609,6 +3181,19 @@ export default function Home() {
                 <div style={{ fontSize: "11.5px", color: "var(--ink-500)" }}>Automated 7-day care continuity ticketing and feedback tracking</div>
               </div>
               <span className="clinical-badge completed">Active</span>
+            </div>
+
+            <div className="integration-row-card">
+              <div>
+                <div style={{ fontSize: "13px", fontWeight: 700 }}>ADK Live Connect (Realtime Messaging)</div>
+                <div style={{ fontSize: "11.5px", color: "var(--ink-500)" }}>Instant peer-to-peer WebSocket messaging between doctors and receptionists</div>
+                <div style={{ fontSize: "11px", color: artStatus.startsWith("connected") ? "var(--emerald-600)" : "var(--primary-600)", fontWeight: 600, marginTop: "2px" }}>
+                  Status: {artStatus}
+                </div>
+              </div>
+              <span className={`clinical-badge ${artStatus.startsWith("connected") ? "completed" : "pending"}`}>
+                {artStatus.startsWith("connected") ? "Active" : "Standby"}
+              </span>
             </div>
 
             <div style={{ display: "flex", gap: "8px", marginTop: "18px" }}>
