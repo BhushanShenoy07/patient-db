@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readClinicSession } from "@/lib/auth";
+import { loadClinicAccounts, readClinicSession, type ClinicProfile } from "@/lib/auth";
 import { issueAccessToken } from "@/lib/art";
 
 export const runtime = "nodejs";
@@ -17,20 +17,28 @@ export async function POST(request: Request) {
   const session = readClinicSession(request);
   if (!session) return NextResponse.json({ message: "Sign in to connect to ART." }, { status: 401 });
   try {
-    const accessToken = await issueAccessToken(session);
+    const url = new URL(request.url);
+    const requestedUsername = url.searchParams.get("username")?.trim().toLowerCase();
+    let profile: ClinicProfile = session;
+    if (requestedUsername && requestedUsername !== session.artUsername) {
+      const match = loadClinicAccounts().find(a => a.artUsername.toLowerCase() === requestedUsername);
+      if (match) profile = match;
+    }
+    const accessToken = await issueAccessToken(profile);
     return NextResponse.json(
       {
         status: 200,
         data: {
           access_token: accessToken,
           refresh_token: "server-managed.0",
-          username: session.artUsername,
+          username: profile.artUsername,
         },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not issue an ART token.";
+    const errorDetails = error instanceof Error && (error as any).cause ? ` (${(error as any).cause.message || (error as any).cause})` : "";
+    const message = error instanceof Error ? `${error.message}${errorDetails}` : "Could not issue an ART token.";
     console.error(`[ART] Token for "${session.artUsername}" failed:`, message);
     return NextResponse.json({ message }, { status: 502 });
   }

@@ -352,6 +352,12 @@ function ChatPanel({
     threadEnd.current?.scrollIntoView({ block: "end" });
   }, [thread.length, activePeer]);
 
+  useEffect(() => {
+    if (people.length && (!activePeer || !people.some(p => p.artUsername.toLowerCase() === activePeer.toLowerCase()))) {
+      onSelect(people[0].artUsername);
+    }
+  }, [people, activePeer, onSelect]);
+
   const conversations = people
     .filter(p =>
       `${p.name} ${p.specialization || ""} ${p.artUsername}`
@@ -807,7 +813,7 @@ export default function Home() {
   async function startArt() {
     setArtStatus("connecting");
     try {
-      await connectArt();
+      await connectArt(user?.artUsername);
       const info = await readArtStatus();
       setArtStatus(`connected as ${info.username}`);
     } catch (error) {
@@ -841,7 +847,7 @@ export default function Home() {
       direction: "out",
       peer: to,
       event: CHAT_EVENT,
-      content: { text, from: self, fromName: user?.doctorName || user?.name },
+      content: { text, from: self, to, fromName: user?.doctorName || user?.name },
       status: "sending",
       read: true,
     };
@@ -959,14 +965,22 @@ export default function Home() {
 
   useEffect(() => {
     if (!user) return;
-    void fetch("/api/clinic/directory")
-      .then(r => r.json())
-      .then(body => {
-        if (Array.isArray(body.people)) {
-          setPeople(body.people);
-        }
-      })
-      .catch(() => setPeople([]));
+    const fetchDir = () => {
+      void fetch(`/api/clinic/directory?username=${encodeURIComponent(user.artUsername || "")}`)
+        .then(r => r.json())
+        .then(body => {
+          if (Array.isArray(body.people)) {
+            setPeople(body.people);
+          }
+          if (Array.isArray(body.activeUsernames)) {
+            setOnlineUsers(new Set(body.activeUsernames.map((u: string) => u.toLowerCase())));
+          }
+        })
+        .catch(() => setPeople([]));
+    };
+    fetchDir();
+    const id = setInterval(fetchDir, 10_000);
+    return () => clearInterval(id);
   }, [user]);
 
   useEffect(() => {
@@ -3031,7 +3045,7 @@ export default function Home() {
             <ChatPanel
               messages={artMessages}
               status={artStatus}
-              people={people}
+              people={people.filter(p => !user?.artUsername || p.artUsername.toLowerCase() !== user.artUsername.toLowerCase())}
               online={onlineUsers}
               presence={presenceOn}
               activePeer={activePeer}
