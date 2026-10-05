@@ -1176,10 +1176,19 @@ export default function Home() {
   }
 
   async function saveRecord(id: string | null, fields: Fields, clearFields: string[] = []) {
+    const cleanFields = { ...fields };
+    const readOnlyKeys = [
+      "Created Time", "Created time", "created_time", "createdTime", "Created",
+      "Last Modified Time", "Last modified time", "last_modified_time", "lastModifiedTime",
+      "Last Modified By", "Created By", "Auto Number", "id", "Record ID"
+    ];
+    for (const k of readOnlyKeys) {
+      delete cleanFields[k];
+    }
     const response = await fetch(id ? `/api/clinic/records?id=${encodeURIComponent(id)}` : "/api/clinic/records", {
       method: id ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fields, clearFields }),
+      body: JSON.stringify({ fields: cleanFields, clearFields }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not persist clinic record.");

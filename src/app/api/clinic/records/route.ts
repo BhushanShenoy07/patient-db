@@ -44,6 +44,17 @@ async function writeRecord(request: Request, id: string | null) {
     // Clean id: if id starts with 'patient:' or is not a standard Airtable ID, treat as null (new record)
     const validRecordId = (id && /^rec[a-zA-Z0-9]+$/.test(id)) ? id : null;
     const fields = { ...body.fields };
+
+    // Strip known computed/read-only fields that Airtable rejects
+    const computedFieldKeys = [
+      "Created Time", "Created time", "created_time", "createdTime", "Created",
+      "Last Modified Time", "Last modified time", "last_modified_time", "lastModifiedTime",
+      "Last Modified By", "Created By", "Auto Number", "id", "Record ID"
+    ];
+    for (const key of computedFieldKeys) {
+      delete fields[key];
+    }
+
     if (Array.isArray(body.clearFields)) {
       for (const field of body.clearFields) {
         if (typeof field !== "string" || field.length > 100) return NextResponse.json({ error: "Invalid field name to clear." }, { status: 400 });

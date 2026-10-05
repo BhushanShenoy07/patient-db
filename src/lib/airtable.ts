@@ -308,9 +308,30 @@ export async function saveAirtableRecord(id: string | null, fields: Record<strin
   const isUpdate = Boolean(id && !id.startsWith("patient:") && !id.startsWith("local:"));
   let currentId: string | null = isUpdate ? id : null;
 
+  const COMPUTED_FIELD_NAMES = new Set([
+    "Created Time",
+    "Created time",
+    "created_time",
+    "createdTime",
+    "Created",
+    "Last Modified Time",
+    "Last modified time",
+    "last_modified_time",
+    "lastModifiedTime",
+    "Last Modified By",
+    "last_modified_by",
+    "Created By",
+    "created_by",
+    "Auto Number",
+    "id",
+    "Record ID",
+  ]);
+
   const values: Record<string, unknown> = { ...fields };
   Object.keys(values).forEach(key => {
-    if (values[key] === undefined) {
+    if (COMPUTED_FIELD_NAMES.has(key)) {
+      delete values[key];
+    } else if (values[key] === undefined) {
       delete values[key];
     } else if (values[key] === "") {
       if (currentId) {
@@ -351,6 +372,18 @@ export async function saveAirtableRecord(id: string | null, fields: Record<strin
           console.warn(`Record ${currentId} not found in Airtable; persisting as a new record.`);
           currentId = null;
           Object.keys(values).forEach(k => { if (values[k] === null || values[k] === "") delete values[k]; });
+          continue;
+        }
+
+        // Check for computed/read-only field error:
+        // "Field \"Created Time\" cannot accept a value because the field is computed"
+        const computedField =
+          /Field "([^"]+)" cannot accept a value because the field is computed/i.exec(message)?.[1] ||
+          /Cannot (?:modify|update) computed field "([^"]+)"/i.exec(message)?.[1] ||
+          /Field "([^"]+)" [^"]*computed/i.exec(message)?.[1];
+        if (computedField && Object.hasOwn(values, computedField)) {
+          console.warn(`Removing computed Airtable field "${computedField}" and retrying...`);
+          delete values[computedField];
           continue;
         }
 

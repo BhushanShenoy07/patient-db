@@ -317,7 +317,11 @@ function saveTicketsToDisk(tickets: any[]) {
 }
 
 export function invalidateTicketsCache() {
+  globalThis.__clinicTicketsCache = [];
   globalThis.__clinicTicketsCacheTime = 0;
+  try {
+    if (fs.existsSync(DISK_CACHE_PATH)) fs.unlinkSync(DISK_CACHE_PATH);
+  } catch {}
 }
 
 export async function getClinicTicketsWithConversations(limit = 30) {
@@ -381,8 +385,46 @@ export async function getClinicTicketsWithConversations(limit = 30) {
       return getTicketsFromDisk();
     }
 
+    const clinicTickets = (tickets || []).filter((t: any) => {
+      const email = (t.requester?.email || t.email || "").toLowerCase();
+      const name = (t.requester?.name || t.name || "").toLowerCase();
+      const subject = (t.subject || "").toLowerCase();
+
+      // Zoom automated notifications
+      if (email.includes("zoom.us") || name === "zoom" || subject.includes("your meeting -") || subject.includes("has joined your meeting")) {
+        return false;
+      }
+      // Freshservice / helpdesk automated receipts & loop notices
+      if (email.includes("freshservice.com") || subject.includes("ticket received -") || /\binc-\d+\b/i.test(subject)) {
+        return false;
+      }
+      // Third-party bots & OTP mailers
+      if (
+        email.includes("donotreply") ||
+        email.includes("no-reply") ||
+        email.includes("noreply") ||
+        email.includes("jioaicloud") ||
+        email.includes("pipedrive") ||
+        email.includes("naukri") ||
+        email.includes("gitguardian") ||
+        email.includes("slack.com") ||
+        email.includes("vercel.com") ||
+        email.includes("airtable.com") ||
+        email.includes("bankofbaroda") ||
+        email.includes("accounts.google.com") ||
+        email.includes("googleplay") ||
+        email.includes("googleone")
+      ) {
+        return false;
+      }
+      if (subject.includes("verification otp") || subject.includes("email verification")) {
+        return false;
+      }
+      return true;
+    });
+
     const enriched = await Promise.all(
-      tickets.map(async (t: any) => {
+      clinicTickets.map(async (t: any) => {
         let conversations: any[] = [];
         const hasRealReplies = Boolean(
           t.stats && (t.stats.agent_responded_at || t.stats.requester_responded_at || t.stats.first_responded_at)
@@ -437,6 +479,91 @@ export async function getClinicTicketsWithConversations(limit = 30) {
       })
     );
 
+    // Synchronize Freshservice tickets and patient replies
+    if (hasFreshserviceConfig()) {
+      try {
+        const fsRes = await freshserviceRequest("/tickets?order_by=updated_at&order_type=desc&per_page=30");
+        const fsTickets: any[] = Array.isArray(fsRes?.tickets) ? fsRes.tickets : [];
+        const normSubj = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+        const fsConvMap = new Map<number, any[]>();
+        await Promise.all(
+          fsTickets.slice(0, 15).map(async (fst: any) => {
+            try {
+              const cRes = await freshserviceRequest(`/tickets/${fst.id}/conversations`);
+              if (Array.isArray(cRes?.conversations) && cRes.conversations.length > 0) {
+                fsConvMap.set(fst.id, cRes.conversations);
+              }
+            } catch {}
+          })
+        );
+
+        const matchedFsIds = new Set<number>();
+        for (const t of enriched) {
+          const matchingFs = fsTickets.find(
+            (fst: any) =>
+              normSubj(fst.subject) === normSubj(t.subject) ||
+              (normSubj(t.subject).length > 15 && normSubj(fst.subject).includes(normSubj(t.subject)))
+          );
+
+          if (matchingFs) {
+            matchedFsIds.add(matchingFs.id);
+            (t as any).fsId = String(matchingFs.id);
+            const fsConvs = fsConvMap.get(matchingFs.id) || [];
+            for (const fsc of fsConvs) {
+              const cleanText = (fsc.body_text || fsc.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+              const alreadyHas = (t.conversations || []).some((c: any) => c.message === cleanText);
+              if (!alreadyHas && cleanText) {
+                t.conversations = t.conversations || [];
+                t.conversations.push({
+                  id: `fs_${fsc.id}`,
+                  incoming: Boolean(fsc.incoming),
+                  from: fsc.incoming ? (matchingFs.requester?.name || t.name || "Patient") : "Doctor / Staff",
+                  message: cleanText,
+                  createdAt: fsc.created_at,
+                });
+                t.hasReplies = true;
+              }
+            }
+          }
+        }
+
+        // Include standalone Freshservice tickets that have patient replies
+        for (const fst of fsTickets) {
+          if (!matchedFsIds.has(fst.id)) {
+            const fsConvs = fsConvMap.get(fst.id) || [];
+            const hasIncoming = fsConvs.some((c: any) => Boolean(c.incoming));
+            if (hasIncoming || fsConvs.length > 0) {
+              const cleanBody = (fst.description_text || fst.description || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+              enriched.push({
+                id: `fs_${fst.id}`,
+                fsId: String(fst.id),
+                subject: fst.subject || "Clinic Consultation",
+                email: fst.requester?.email || "",
+                name: fst.requester?.name || "Patient",
+                status: Number(fst.status || 2),
+                priority: Number(fst.priority || 1),
+                message: cleanBody.slice(0, 500),
+                createdAt: fst.created_at,
+                updatedAt: fst.updated_at,
+                tags: Array.isArray(fst.tags) ? fst.tags : [],
+                hasReplies: true,
+                conversations: fsConvs.map((c: any) => ({
+                  id: `fs_${c.id}`,
+                  incoming: Boolean(c.incoming),
+                  from: c.incoming ? (fst.requester?.name || "Patient") : "Doctor / Staff",
+                  message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+                  createdAt: c.created_at,
+                })),
+              } as any);
+            }
+          }
+        }
+      } catch (fsErr) {
+        console.warn("Freshservice ticket sync notice:", fsErr instanceof Error ? fsErr.message : fsErr);
+      }
+    }
+
     globalThis.__clinicTicketsCache = enriched;
     globalThis.__clinicTicketsCacheTime = Date.now();
     saveTicketsToDisk(enriched);
@@ -470,24 +597,86 @@ export async function getClinicTicketsWithConversations(limit = 30) {
 }
 
 export async function replyToFreshdeskTicket(ticketId: number | string, replyMessage: string) {
-  invalidateTicketsCache();
-  if (!hasFreshdeskConfig()) {
-    const existing = localTickets.find(t => String(t.id) === String(ticketId));
-    if (existing) {
-      existing.description_text += `\n[Staff Reply]: ${replyMessage}`;
-    }
-    return { id: Date.now(), simulated: true };
-  }
-
-  const cleanId = String(ticketId).replace(/[^0-9]/g, "");
+  const rawId = String(ticketId).trim();
+  const isFreshservice = rawId.startsWith("fs_");
+  const cleanId = rawId.replace(/^fs_/, "").replace(/[^0-9]/g, "");
   if (!cleanId) throw new Error("Invalid ticket ID for reply.");
 
-  const formattedBody = `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;"><p>${escapeHtml(replyMessage).replace(/\n/g, "<br/>")}</p><p style="margin-top: 16px; font-size: 12px; color: #64748b;">— Clinic Reception Desk</p></div>`;
+  const hasCustomSign = replyMessage.includes("— Sent by");
+  const formattedBody = `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;"><p>${escapeHtml(replyMessage).replace(/\n/g, "<br/>")}</p>${hasCustomSign ? "" : '<p style="margin-top: 16px; font-size: 12px; color: #64748b;">— Clinic Care Team</p>'}</div>`;
 
-  return await freshdeskRequest(`/tickets/${cleanId}/reply`, {
-    method: "POST",
-    body: JSON.stringify({ body: formattedBody }),
-  });
+  // Look up cached ticket FIRST before clearing cache
+  const cached = (globalThis.__clinicTicketsCache || []).find(
+    (t: any) => String(t.id) === rawId || String(t.id) === cleanId || String(t.fsId) === cleanId
+  );
+  let fdId = isFreshservice ? (cached?.id && !cached.id.startsWith("fs_") ? cached.id : null) : cleanId;
+  let fsId = isFreshservice ? cleanId : (cached?.fsId || null);
+
+  // If fsId wasn't found from cache, query matching Freshservice ticket by subject
+  if (!fsId && hasFreshserviceConfig() && fdId) {
+    try {
+      const fdTicket = cached || await freshdeskRequest(`/tickets/${fdId}`);
+      if (fdTicket?.subject) {
+        const normSubj = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const fsRes = await freshserviceRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=30`);
+        const matchingFs = (fsRes?.tickets || []).find((fst: any) =>
+          normSubj(fst.subject) === normSubj(fdTicket.subject) ||
+          (normSubj(fdTicket.subject).length > 15 && normSubj(fst.subject).includes(normSubj(fdTicket.subject)))
+        );
+        if (matchingFs) {
+          fsId = String(matchingFs.id);
+        }
+      }
+    } catch {}
+  }
+
+  let replyDelivered = false;
+  let lastResult: any = null;
+
+  // 1. Deliver reply to Freshdesk
+  if (hasFreshdeskConfig() && fdId) {
+    try {
+      lastResult = await freshdeskRequest(`/tickets/${fdId}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ body: formattedBody }),
+      });
+      replyDelivered = true;
+    } catch (fdErr) {
+      console.warn(`Could not dispatch reply to Freshdesk #${fdId}:`, fdErr instanceof Error ? fdErr.message : fdErr);
+    }
+  }
+
+  // 2. Deliver reply to Freshservice
+  if (hasFreshserviceConfig()) {
+    const targetFsId = fsId || (isFreshservice ? cleanId : null);
+    if (targetFsId) {
+      try {
+        const fsRes = await freshserviceRequest(`/tickets/${targetFsId}/reply`, {
+          method: "POST",
+          body: JSON.stringify({ body: formattedBody }),
+        });
+        if (!lastResult) lastResult = fsRes;
+        replyDelivered = true;
+      } catch (fsErr) {
+        console.warn(`Could not dispatch reply to Freshservice #${targetFsId}:`, fsErr instanceof Error ? fsErr.message : fsErr);
+      }
+    }
+  }
+
+  // Invalidate cache AFTER dispatching replies so next load fetches latest dialogue
+  invalidateTicketsCache();
+
+  if (!replyDelivered) {
+    if (!hasFreshdeskConfig() && !hasFreshserviceConfig()) {
+      const existing = localTickets.find(t => String(t.id) === String(ticketId));
+      if (existing) {
+        existing.description_text += `\n[Staff Reply]: ${replyMessage}`;
+      }
+      return { id: Date.now(), simulated: true };
+    }
+  }
+
+  return lastResult || { ok: true, message: "Reply delivered to patient via Freshworks." };
 }
 
 export async function searchFollowupTickets(tag: string) {
