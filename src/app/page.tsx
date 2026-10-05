@@ -1453,8 +1453,8 @@ export default function Home() {
         editingAppt
           ? `Appointment record updated in database.${emailNotice}`
           : appt.mode === "Online"
-          ? `Online Telehealth consultation scheduled and saved to database. Video room prepared.${emailNotice}`
-          : `In-person clinical appointment scheduled and saved to database.${emailNotice}`
+            ? `Online Telehealth consultation scheduled and saved to database. Video room prepared.${emailNotice}`
+            : `In-person clinical appointment scheduled and saved to database.${emailNotice}`
       );
 
       setSelectedDay(appt.date);
@@ -1638,7 +1638,7 @@ export default function Home() {
   }
 
   async function signOut() {
-    await disconnectArt().catch(() => {});
+    await disconnectArt().catch(() => { });
     await fetch("/api/auth/session", { method: "DELETE" });
     setUser(null);
     setRecords([]);
@@ -2748,7 +2748,7 @@ export default function Home() {
                   <IconInbox size={15} />
                 </div>
                 <div>
-                  <strong>Receptionist Direct Notification Active:</strong> All consultation notices and follow-ups are assigned to Receptionist Agent <em>vrushali p</em> (<code>shreyas.kulkunda@bixbytessolutions.com</code>). When any patient or doctor replies, Freshdesk automatically emails the receptionist immediately and pulls their response into this care thread. You can review dialogue and respond directly below.
+                  <strong>Receptionist Direct Notification Active:</strong> All consultation notices and follow-ups are assigned to Receptionist Agent <em>vrushali p</em>. When any patient or doctor replies, Freshdesk automatically emails the receptionist immediately and pulls their response into this care thread. You can review dialogue and respond directly below.
                 </div>
               </div>
             )}
@@ -3055,8 +3055,8 @@ export default function Home() {
                     {inboxFilter === "replies"
                       ? "No messages currently have conversation replies. All incoming tickets are listed under 'All'."
                       : inboxSearch || inboxFilter !== "all"
-                      ? "No items match your filter criteria. Try clearing search filters."
-                      : "Incoming patient and physician email replies will automatically appear here."}
+                        ? "No items match your filter criteria. Try clearing search filters."
+                        : "Incoming patient and physician email replies will automatically appear here."}
                   </div>
                   {(inboxSearch || inboxFilter !== "all") && (
                     <div style={{ marginTop: "12px" }}>
