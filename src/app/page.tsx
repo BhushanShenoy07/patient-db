@@ -1865,29 +1865,31 @@ export default function Home() {
 
             {/* ACTION PILL BUTTONS (IMAGE 1 STYLE) */}
             <div className="topbar-action-group">
-              <button
-                type="button"
-                className="pill-btn-primary"
-                onClick={() => {
-                  setTab("appointments");
-                  setEditingAppt(null);
-                  setAppt({
-                    patient: "",
-                    doctor: isDoctorRole ? (user.doctorName || "") : "",
-                    date: isoDate(),
-                    time: null,
-                    mode: "Online",
-                    status: "Scheduled",
-                    notes: "",
-                    followupStart: isoDate(),
-                    followupDay: 1,
-                    ticketId: "",
-                  });
-                }}
-              >
-                <IconCross size={13} />
-                <span>{isDoctorRole ? "New Visit" : "Book Appointment"}</span>
-              </button>
+              {!isDoctorRole && (
+                <button
+                  type="button"
+                  className="pill-btn-primary"
+                  onClick={() => {
+                    setTab("appointments");
+                    setEditingAppt(null);
+                    setAppt({
+                      patient: "",
+                      doctor: "",
+                      date: isoDate(),
+                      time: null,
+                      mode: "Online",
+                      status: "Scheduled",
+                      notes: "",
+                      followupStart: isoDate(),
+                      followupDay: 1,
+                      ticketId: "",
+                    });
+                  }}
+                >
+                  <IconCross size={13} />
+                  <span>Book Appointment</span>
+                </button>
+              )}
 
               {!isDoctorRole && (
                 <button
@@ -2053,15 +2055,16 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 3-Column Appointments View */}
-            <section className="appointments-grid-layout">
-              {/* Column 1: Scheduling Form */}
-              <form className="card-panel" onSubmit={handleAppointmentSubmit}>
-                <div className="panel-header-line">
-                  <h2 className="panel-title">
-                    {editingAppt ? "Modify Appointment" : "New Consultation"}
-                  </h2>
-                </div>
+            {/* Appointments View: 3-column for receptionist, 2-column for doctor */}
+            <section className={`appointments-grid-layout ${isDoctorRole ? "doctor-view" : ""}`}>
+              {/* Column 1: Scheduling Form (Receptionist only) */}
+              {!isDoctorRole && (
+                <form className="card-panel" onSubmit={handleAppointmentSubmit}>
+                  <div className="panel-header-line">
+                    <h2 className="panel-title">
+                      {editingAppt ? "Modify Appointment" : "New Consultation"}
+                    </h2>
+                  </div>
                 <div className="panel-subtitle">
                   Configure patient, physician, date, and consultation format.
                 </div>
@@ -2247,8 +2250,9 @@ export default function Home() {
                   )}
                 </div>
               </form>
+            )}
 
-              {/* Column 2: Appointment Cards List */}
+            {/* Column 2: Appointment Cards List */}
               <div className="card-panel">
                 <div className="panel-header-line">
                   <h2 className="panel-title">
@@ -2384,43 +2388,47 @@ export default function Home() {
                                 {sendingFollowupFor === r.id ? "Dispatching…" : "Care Continuity Follow-up"}
                               </button>
                             )}
-                            <button
-                              className="action-sub-btn"
-                              onClick={() => {
-                                setSendingMessageFor(r.id);
-                                void sendAppointmentEmail(r).then((res) => {
-                                  const doc = r.fields[COL.doctor];
-                                  const patient = r.fields[COL.name];
-                                  if (res?.ok) {
-                                    if (res.patientTicketId) {
-                                      const tid = String(res.patientTicketId);
-                                      setRecords(old => old.map(item => item.id === r.id ? { ...item, fields: { ...item.fields, [COL.ticketId]: tid } } : item));
-                                    }
-                                    const ticketTag = res.patientTicketId ? ` (Ticket #${res.patientTicketId})` : "";
-                                    if (doc) {
-                                      setToast(`Appointment notice transmitted to ${patient} and ${doc}${ticketTag}.`);
-                                    } else {
-                                      setToast(`Appointment notice transmitted to ${patient}${ticketTag}.`);
-                                    }
-                                  }
-                                }).finally(() => setSendingMessageFor(null));
-                              }}
-                              disabled={sendingMessageFor === r.id}
-                            >
-                              {sendingMessageFor === r.id ? "Sending…" : "Send Email Reminder"}
-                            </button>
-                            <button
-                              className="action-sub-btn"
-                              style={{ backgroundColor: "var(--primary-50)", color: "var(--primary-700)", borderColor: "var(--primary-line)" }}
-                              onClick={() => void sendAppointmentMessage(r)}
-                              disabled={sendingMessageFor === r.id}
-                              title="Transmit instant appointment card to doctor's ADK Live Connect"
-                            >
-                              {sendingMessageFor === r.id ? "Alerting…" : "Notify Doctor (ADK)"}
-                            </button>
-                            <button className="action-sub-btn" onClick={() => editAppointment(r)}>
-                              Edit
-                            </button>
+                            {!isDoctorRole && (
+                              <>
+                                <button
+                                  className="action-sub-btn"
+                                  onClick={() => {
+                                    setSendingMessageFor(r.id);
+                                    void sendAppointmentEmail(r).then((res) => {
+                                      const doc = r.fields[COL.doctor];
+                                      const patient = r.fields[COL.name];
+                                      if (res?.ok) {
+                                        if (res.patientTicketId) {
+                                          const tid = String(res.patientTicketId);
+                                          setRecords(old => old.map(item => item.id === r.id ? { ...item, fields: { ...item.fields, [COL.ticketId]: tid } } : item));
+                                        }
+                                        const ticketTag = res.patientTicketId ? ` (Ticket #${res.patientTicketId})` : "";
+                                        if (doc) {
+                                          setToast(`Appointment notice transmitted to ${patient} and ${doc}${ticketTag}.`);
+                                        } else {
+                                          setToast(`Appointment notice transmitted to ${patient}${ticketTag}.`);
+                                        }
+                                      }
+                                    }).finally(() => setSendingMessageFor(null));
+                                  }}
+                                  disabled={sendingMessageFor === r.id}
+                                >
+                                  {sendingMessageFor === r.id ? "Sending…" : "Send Email Reminder"}
+                                </button>
+                                <button
+                                  className="action-sub-btn"
+                                  style={{ backgroundColor: "var(--primary-50)", color: "var(--primary-700)", borderColor: "var(--primary-line)" }}
+                                  onClick={() => void sendAppointmentMessage(r)}
+                                  disabled={sendingMessageFor === r.id}
+                                  title="Transmit instant appointment card to doctor's ADK Live Connect"
+                                >
+                                  {sendingMessageFor === r.id ? "Alerting…" : "Notify Doctor (ADK)"}
+                                </button>
+                                <button className="action-sub-btn" onClick={() => editAppointment(r)}>
+                                  Edit
+                                </button>
+                              </>
+                            )}
                             <button className="action-sub-btn btn-danger" onClick={() => void deleteAppointment(r)}>
                               {isCancelled ? "Delete Record" : "Cancel Visit"}
                             </button>

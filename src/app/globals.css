@@ -636,6 +636,9 @@ input:focus, select:focus, textarea:focus {
   gap: 16px;
   align-items: start;
 }
+.appointments-grid-layout.doctor-view {
+  grid-template-columns: minmax(0, 1fr) 300px;
+}
 .two-column-layout {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
@@ -1466,6 +1469,9 @@ input:focus, select:focus, textarea:focus {
   .appointments-grid-layout {
     grid-template-columns: 300px 1fr;
   }
+  .appointments-grid-layout.doctor-view {
+    grid-template-columns: 1fr;
+  }
   .calendar-panel {
     grid-column: 1 / -1;
   }
@@ -1482,7 +1488,7 @@ input:focus, select:focus, textarea:focus {
     margin: 6px 0 0;
     overflow-x: auto;
   }
-  .appointments-grid-layout, .two-column-layout {
+  .appointments-grid-layout, .two-column-layout, .appointments-grid-layout.doctor-view {
     grid-template-columns: 1fr;
   }
   .overview-bar {
