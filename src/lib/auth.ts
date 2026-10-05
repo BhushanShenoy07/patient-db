@@ -16,6 +16,13 @@ export type ClinicProfile = {
 export type ClinicSession = ClinicProfile & { expiresAt: number };
 export type ClinicAccount = ClinicProfile & { password: string };
 
+export class ClinicConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClinicConfigurationError";
+  }
+}
+
 export const CLINIC_DOCTORS = [
   { name: "Dr. Ananya Rao", specialization: "General Medicine" },
   { name: "Dr. Arjun Mehta", specialization: "Cardiology" },
@@ -97,29 +104,52 @@ export const DEFAULT_CLINIC_ACCOUNTS: ClinicAccount[] = RAW_DEFAULT_ACCOUNTS.map
 
 export function loadClinicAccounts(): ClinicAccount[] {
   const raw = process.env.CLINIC_USERS_JSON?.trim();
-  if (!raw || raw === "xxx") return DEFAULT_CLINIC_ACCOUNTS;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return DEFAULT_CLINIC_ACCOUNTS;
-    const list: ClinicAccount[] = [];
-    for (const account of parsed as any[]) {
-      const role = account?.role;
-      if (typeof account?.email !== "string" || typeof account?.password !== "string" || !["doctor", "receptionist"].includes(role) || typeof account?.name !== "string") {
-        continue;
-      }
-      list.push(buildClinicAccount({
-        email: account.email,
-        password: account.password,
-        name: account.name,
-        role,
-        doctorName: account.doctorName,
-        specialization: account.specialization,
-      }));
+  if (!raw || raw === "xxx") {
+    if (process.env.NODE_ENV === "production") {
+      throw new ClinicConfigurationError("Clinic login is not configured. Add CLINIC_USERS_JSON in Vercel → Project Settings → Environment Variables, then redeploy.");
     }
-    return list.length ? list : DEFAULT_CLINIC_ACCOUNTS;
-  } catch {
     return DEFAULT_CLINIC_ACCOUNTS;
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new ClinicConfigurationError("Clinic login is misconfigured. CLINIC_USERS_JSON must contain a valid JSON array of staff accounts.");
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new ClinicConfigurationError("Clinic login is misconfigured. CLINIC_USERS_JSON must contain a non-empty JSON array of staff accounts.");
+  }
+
+  const accounts: ClinicAccount[] = [];
+  for (const account of parsed) {
+    if (
+      !account ||
+      typeof account !== "object" ||
+      !("email" in account) ||
+      typeof account.email !== "string" ||
+      !account.email.trim() ||
+      !("password" in account) ||
+      typeof account.password !== "string" ||
+      !account.password ||
+      !("role" in account) ||
+      (account.role !== "doctor" && account.role !== "receptionist") ||
+      !("name" in account) ||
+      typeof account.name !== "string" ||
+      !account.name.trim()
+    ) {
+      throw new ClinicConfigurationError("Clinic login is misconfigured. Each CLINIC_USERS_JSON account needs a non-empty email, password, name, and a role of doctor or receptionist.");
+    }
+    accounts.push(buildClinicAccount({
+      email: account.email,
+      password: account.password,
+      name: account.name,
+      role: account.role,
+      doctorName: "doctorName" in account && typeof account.doctorName === "string" ? account.doctorName : undefined,
+      specialization: "specialization" in account && typeof account.specialization === "string" ? account.specialization : undefined,
+    }));
+  }
+  return accounts;
 }
 
 export function findClinicProfile(email: string): ClinicProfile | null {

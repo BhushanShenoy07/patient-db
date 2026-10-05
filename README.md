@@ -4,7 +4,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 The receptionist books an existing patient with one of the eleven doctors in the backend directory. The dropdown includes each doctor's name and specialty. For doctor logins, add the doctor's real email and password to `CLINIC_USERS_JSON` with `role: "doctor"` and a matching `doctorName`. The account filters appointments by doctor name.
 
-Example account entry: `{"email":"doctor@clinic.com","password":"set-a-private-password","role":"doctor","name":"Dr. Ananya Rao","doctorName":"Dr. Ananya Rao"}`. Configure each doctor's actual email this way to enable their login and appointment email delivery.
+Set `CLINIC_USERS_JSON` to a JSON array of staff accounts in the server environment. For example: `[{"email":"doctor@clinic.com","password":"set-a-private-password","role":"doctor","name":"Dr. Ananya Rao","doctorName":"Dr. Ananya Rao"}]`. In Vercel, add the value under **Project → Settings → Environment Variables**, choose the Production environment, and redeploy. Passwords are matched exactly; the selected role must match the account. Local development retains demo accounts when this variable is unset, but production requires explicitly configured accounts and reports invalid configuration instead of silently using demo credentials.
 
 Set these values in the server environment (for local development, `.env.local`):
 
