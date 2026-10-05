@@ -438,13 +438,18 @@ export async function getClinicTicketsWithConversations(limit = 30) {
             try {
               const convRes = await freshdeskRequest(`/tickets/${t.id}/conversations`);
               if (Array.isArray(convRes)) {
-                conversations = convRes.map((c: any) => ({
-                  id: String(c.id),
-                  incoming: Boolean(c.incoming),
-                  from: c.from_email || (c.incoming ? (t.requester?.name || "Patient / Doctor") : "Reception Desk Staff"),
-                  message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
-                  createdAt: c.created_at,
-                }));
+                conversations = convRes.map((c: any) => {
+                  const rawMsg = (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+                  const sentMatch = rawMsg.match(/— Sent by (.*?)(?:\n|$)/);
+                  const sender = sentMatch ? sentMatch[1].trim() : (c.from_email || (c.incoming ? (t.requester?.name || "Patient / Doctor") : "Doctor / Staff"));
+                  return {
+                    id: String(c.id),
+                    incoming: Boolean(c.incoming),
+                    from: c.incoming ? (t.requester?.name || "Patient / Doctor") : sender,
+                    message: rawMsg,
+                    createdAt: c.created_at,
+                  };
+                });
               }
             } catch (convErr) {
               console.warn(`Could not load conversations for ticket #${t.id}:`, convErr instanceof Error ? convErr.message : convErr);
@@ -514,11 +519,13 @@ export async function getClinicTicketsWithConversations(limit = 30) {
               const cleanText = (fsc.body_text || fsc.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
               const alreadyHas = (t.conversations || []).some((c: any) => c.message === cleanText);
               if (!alreadyHas && cleanText) {
+                const sentMatch = cleanText.match(/— Sent by (.*?)(?:\n|$)/);
+                const sender = sentMatch ? sentMatch[1].trim() : (fsc.incoming ? (matchingFs.requester?.name || t.name || "Patient") : "Doctor / Staff");
                 t.conversations = t.conversations || [];
                 t.conversations.push({
                   id: `fs_${fsc.id}`,
                   incoming: Boolean(fsc.incoming),
-                  from: fsc.incoming ? (matchingFs.requester?.name || t.name || "Patient") : "Doctor / Staff",
+                  from: sender,
                   message: cleanText,
                   createdAt: fsc.created_at,
                 });
@@ -548,19 +555,31 @@ export async function getClinicTicketsWithConversations(limit = 30) {
                 updatedAt: fst.updated_at,
                 tags: Array.isArray(fst.tags) ? fst.tags : [],
                 hasReplies: true,
-                conversations: fsConvs.map((c: any) => ({
-                  id: `fs_${c.id}`,
-                  incoming: Boolean(c.incoming),
-                  from: c.incoming ? (fst.requester?.name || "Patient") : "Doctor / Staff",
-                  message: (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
-                  createdAt: c.created_at,
-                })),
+                conversations: fsConvs.map((c: any) => {
+                  const cText = (c.body_text || c.body || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+                  const sentMatch = cText.match(/— Sent by (.*?)(?:\n|$)/);
+                  const sender = sentMatch ? sentMatch[1].trim() : (c.incoming ? (fst.requester?.name || "Patient") : "Doctor / Staff");
+                  return {
+                    id: `fs_${c.id}`,
+                    incoming: Boolean(c.incoming),
+                    from: sender,
+                    message: cText,
+                    createdAt: c.created_at,
+                  };
+                }),
               } as any);
             }
           }
         }
       } catch (fsErr) {
         console.warn("Freshservice ticket sync notice:", fsErr instanceof Error ? fsErr.message : fsErr);
+      }
+    }
+
+    // Ensure all conversations are chronologically ordered (oldest first, newest last)
+    for (const t of enriched) {
+      if (Array.isArray(t.conversations) && t.conversations.length > 1) {
+        t.conversations.sort((a: any, b: any) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
       }
     }
 
@@ -605,19 +624,24 @@ export async function replyToFreshdeskTicket(ticketId: number | string, replyMes
   const hasCustomSign = replyMessage.includes("— Sent by");
   const formattedBody = `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #1e293b;"><p>${escapeHtml(replyMessage).replace(/\n/g, "<br/>")}</p>${hasCustomSign ? "" : '<p style="margin-top: 16px; font-size: 12px; color: #64748b;">— Clinic Care Team</p>'}</div>`;
 
-  // Look up cached ticket FIRST before clearing cache
-  const cached = (globalThis.__clinicTicketsCache || []).find(
+  // Look up cached ticket FIRST from memory or disk fallback
+  const disk = getTicketsFromDisk();
+  const allKnown = (globalThis.__clinicTicketsCache && globalThis.__clinicTicketsCache.length > 0)
+    ? globalThis.__clinicTicketsCache
+    : disk;
+  const cached = (allKnown || []).find(
     (t: any) => String(t.id) === rawId || String(t.id) === cleanId || String(t.fsId) === cleanId
   );
   let fdId = isFreshservice ? (cached?.id && !cached.id.startsWith("fs_") ? cached.id : null) : cleanId;
   let fsId = isFreshservice ? cleanId : (cached?.fsId || null);
+
+  const normSubj = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
   // If fsId wasn't found from cache, query matching Freshservice ticket by subject
   if (!fsId && hasFreshserviceConfig() && fdId) {
     try {
       const fdTicket = cached || await freshdeskRequest(`/tickets/${fdId}`);
       if (fdTicket?.subject) {
-        const normSubj = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
         const fsRes = await freshserviceRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=30`);
         const matchingFs = (fsRes?.tickets || []).find((fst: any) =>
           normSubj(fst.subject) === normSubj(fdTicket.subject) ||
@@ -630,8 +654,27 @@ export async function replyToFreshdeskTicket(ticketId: number | string, replyMes
     } catch {}
   }
 
+  // If fdId wasn't found from cache, query matching Freshdesk ticket by subject
+  if (!fdId && hasFreshdeskConfig() && fsId) {
+    try {
+      const fsTicket = await freshserviceRequest(`/tickets/${fsId}`);
+      const fsSubj = fsTicket?.ticket?.subject || fsTicket?.subject;
+      if (fsSubj) {
+        const fdRes = await freshdeskRequest(`/tickets?order_by=updated_at&order_type=desc&per_page=30`);
+        const matchingFd = (Array.isArray(fdRes) ? fdRes : []).find((fdt: any) =>
+          normSubj(fdt.subject) === normSubj(fsSubj) ||
+          (normSubj(fsSubj).length > 15 && normSubj(fdt.subject).includes(normSubj(fsSubj)))
+        );
+        if (matchingFd) {
+          fdId = String(matchingFd.id);
+        }
+      }
+    } catch {}
+  }
+
   let replyDelivered = false;
   let lastResult: any = null;
+  let lastError: Error | null = null;
 
   // 1. Deliver reply to Freshdesk
   if (hasFreshdeskConfig() && fdId) {
@@ -642,6 +685,7 @@ export async function replyToFreshdeskTicket(ticketId: number | string, replyMes
       });
       replyDelivered = true;
     } catch (fdErr) {
+      lastError = fdErr instanceof Error ? fdErr : new Error(String(fdErr));
       console.warn(`Could not dispatch reply to Freshdesk #${fdId}:`, fdErr instanceof Error ? fdErr.message : fdErr);
     }
   }
@@ -658,6 +702,7 @@ export async function replyToFreshdeskTicket(ticketId: number | string, replyMes
         if (!lastResult) lastResult = fsRes;
         replyDelivered = true;
       } catch (fsErr) {
+        if (!lastError) lastError = fsErr instanceof Error ? fsErr : new Error(String(fsErr));
         console.warn(`Could not dispatch reply to Freshservice #${targetFsId}:`, fsErr instanceof Error ? fsErr.message : fsErr);
       }
     }
@@ -674,6 +719,8 @@ export async function replyToFreshdeskTicket(ticketId: number | string, replyMes
       }
       return { id: Date.now(), simulated: true };
     }
+    if (lastError) throw lastError;
+    throw new Error("Unable to deliver reply to Freshdesk or Freshservice.");
   }
 
   return lastResult || { ok: true, message: "Reply delivered to patient via Freshworks." };

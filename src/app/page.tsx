@@ -33,6 +33,7 @@ type FollowupConversation = {
 
 type FollowupUpdate = {
   id: string;
+  fsId?: string;
   subject: string;
   email: string;
   name: string;
@@ -1142,7 +1143,7 @@ export default function Home() {
       const response = await fetch(url);
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load follow-up records.");
-      if (Array.isArray(body.updates) && body.updates.length > 0) {
+      if (Array.isArray(body.updates)) {
         setFollowupUpdates(body.updates);
         if (forceRefresh && !silent) {
           setToast(`Inbox refreshed with ${body.updates.length} message threads.`);
@@ -1155,21 +1156,49 @@ export default function Home() {
 
   async function submitTicketReply(ticketId: string, recipientName: string) {
     if (!replyMessageText.trim()) return;
+    const msgToSend = replyMessageText.trim();
     setSendingReply(true);
+
+    const doctorSender = user?.doctorName || user?.name || "Dr. Bhushan Shenoy";
+    const optimisticConv = {
+      id: `local_${Date.now()}`,
+      incoming: false,
+      from: doctorSender,
+      message: `${msgToSend}\n\n— Sent by ${doctorSender}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Optimistically update conversations so the doctor immediately sees their reply
+    setFollowupUpdates(prev =>
+      prev.map(item => {
+        if (String(item.id) === String(ticketId) || String(item.fsId) === String(ticketId)) {
+          return {
+            ...item,
+            hasReplies: true,
+            conversations: [...(item.conversations || []), optimisticConv],
+          };
+        }
+        return item;
+      })
+    );
+
+    setReplyMessageText("");
+    setActiveReplyTicketId(null);
+
     try {
       const res = await fetch("/api/follow-up/inbox", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ticketId, message: replyMessageText.trim() }),
+        body: JSON.stringify({ ticketId, message: msgToSend }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to dispatch reply.");
-      setToast(`Reply successfully sent to ${recipientName} via Freshdesk!`);
-      setReplyMessageText("");
-      setActiveReplyTicketId(null);
-      void loadFollowupUpdates(true);
+      setToast(`Reply successfully delivered to ${recipientName} via Freshworks!`);
+      // Invalidate tickets cache and fetch fresh conversations
+      void loadFollowupUpdates(true, true);
     } catch (err) {
       setToast(err instanceof Error ? err.message : "Error dispatching reply.");
+      void loadFollowupUpdates(true, true);
     } finally {
       setSendingReply(false);
     }
@@ -2904,7 +2933,9 @@ export default function Home() {
                             >
                               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "4px" }}>
                                 <span style={{ fontSize: "12px", fontWeight: 700, color: c.incoming ? "var(--emerald-600)" : "var(--ink-700)" }}>
-                                  {c.incoming ? `📩 Reply from ${c.from}` : `📤 ${c.from}`}
+                                  {c.incoming
+                                    ? `📩 Reply from ${c.from}`
+                                    : `📤 ${c.message?.match(/— Sent by (.*?)(?:\n|$)/)?.[1] || (c.from?.includes("support@") ? (user?.doctorName || "Doctor") : c.from)}`}
                                 </span>
                                 <span style={{ fontSize: "11px", color: "var(--ink-400)" }}>
                                   {c.createdAt ? new Date(c.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Recent"}
@@ -2953,7 +2984,7 @@ export default function Home() {
                         </div>
                         <textarea
                           rows={3}
-                          placeholder={`Write a reply to ${u.name}... This message will be delivered directly to their inbox via Freshdesk.`}
+                          placeholder={`Write a reply to ${u.name}... This message will be delivered directly to the patient via Freshworks (email & portal).`}
                           value={replyMessageText}
                           onChange={e => setReplyMessageText(e.target.value)}
                           style={{ resize: "vertical", marginBottom: "10px" }}
@@ -2978,7 +3009,7 @@ export default function Home() {
                             onClick={() => void submitTicketReply(u.id, u.name)}
                           >
                             <IconSend size={12} />
-                            <span>{sendingReply ? "Transmitting..." : "Send Reply via Freshdesk"}</span>
+                            <span>{sendingReply ? "Transmitting..." : "Send Reply to Patient"}</span>
                           </button>
                         </div>
                       </div>
