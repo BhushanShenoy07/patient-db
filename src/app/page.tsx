@@ -82,6 +82,11 @@ const COL = {
   bloodGroup: "Blood Group",
   age: "Age",
   gender: "Gender",
+  followupStart: "Follow-up Start",
+  followupDay: "Follow-up Day",
+  ticketId: "Ticket ID",
+  createdTime: "Created Time",
+  lastModifiedTime: "Last Modified Time",
 };
 
 const START = 9 * 60, END = 18 * 60, SLOT = 30;
@@ -776,6 +781,9 @@ export default function Home() {
     mode: "Online",
     status: "Scheduled",
     notes: "",
+    followupStart: isoDate(),
+    followupDay: 1,
+    ticketId: "",
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [testingIntegrations, setTestingIntegrations] = useState(false);
@@ -1281,6 +1289,10 @@ export default function Home() {
         }),
       });
       const body = await response.json().catch(() => ({}));
+      if (body?.patientTicketId) {
+        const tid = String(body.patientTicketId);
+        setRecords(old => old.map(r => r.id === record.id ? { ...r, fields: { ...r.fields, [COL.ticketId]: tid } } : r));
+      }
       return body;
     } catch (err) {
       console.warn("Email notice:", err);
@@ -1321,8 +1333,10 @@ export default function Home() {
         [COL.bloodGroup]: patientForm.bloodGroup.trim(),
         [COL.notes]: patientForm.notes.trim(),
         [COL.age]: patientForm.age.trim(),
-        [COL.gender]: patientForm.gender,
+        [COL.gender]: patientForm.gender || "Other",
         [COL.status]: "Registered",
+        [COL.followupStart]: isoDate(),
+        [COL.followupDay]: "1",
       };
       const targetId = (editingPatient && !editingPatient.startsWith("patient:")) ? editingPatient : null;
       const saved = await saveRecord(targetId, fields);
@@ -1361,6 +1375,11 @@ export default function Home() {
 
     const f = patient.fields;
     const existing = editingAppt ? appointments.find(r => r.id === editingAppt) : undefined;
+    const followupStartVal = appt.followupStart || appt.date;
+    const followupDayNum = Number(appt.followupDay || 1);
+    const clinicalNotes = appt.notes.trim() || f[COL.notes] || "";
+    const existingTicketId = appt.ticketId?.trim() || existing?.fields[COL.ticketId] || "";
+
     const fields: Fields = {
       [COL.name]: f[COL.name],
       [COL.email]: f[COL.email] || "",
@@ -1370,7 +1389,13 @@ export default function Home() {
       [COL.doctor]: appt.doctor.trim(),
       [COL.status]: appt.status,
       [COL.mode]: appt.mode,
-      [COL.notes]: appt.notes.trim(),
+      [COL.notes]: clinicalNotes,
+      [COL.bloodGroup]: f[COL.bloodGroup] || "",
+      [COL.age]: f[COL.age] || "",
+      [COL.gender]: f[COL.gender] || "Other",
+      [COL.followupStart]: followupStartVal,
+      [COL.followupDay]: String(followupDayNum),
+      ...(existingTicketId ? { [COL.ticketId]: existingTicketId } : {}),
     };
 
     setBusy(true);
@@ -1442,7 +1467,12 @@ export default function Home() {
         try {
           const emailResult = await sendAppointmentEmail({ ...saved, fields: { ...fields, ...saved.fields } });
           if (emailResult?.ok) {
-            emailNotice = " Email confirmation dispatched to patient and physician via Freshdesk.";
+            const ticketTag = emailResult.patientTicketId ? ` (Ticket #${emailResult.patientTicketId})` : "";
+            emailNotice = ` Email confirmation dispatched to patient and physician via Freshdesk${ticketTag}.`;
+            if (emailResult.patientTicketId) {
+              const tid = String(emailResult.patientTicketId);
+              setRecords(old => old.map(r => r.id === saved.id ? { ...r, fields: { ...r.fields, [COL.ticketId]: tid } } : r));
+            }
           }
         } catch (mailErr) {
           console.warn("Notice: could not dispatch Freshdesk notification:", mailErr);
@@ -1460,7 +1490,18 @@ export default function Home() {
       setSelectedDay(appt.date);
       setMonth(new Date(`${appt.date}T00:00:00`));
       setEditingAppt(null);
-      setAppt({ patient: "", doctor: "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
+      setAppt({
+        patient: "",
+        doctor: "",
+        date: isoDate(),
+        time: null,
+        mode: "Online",
+        status: "Scheduled",
+        notes: "",
+        followupStart: isoDate(),
+        followupDay: 1,
+        ticketId: "",
+      });
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Error saving appointment.");
     } finally {
@@ -1557,6 +1598,9 @@ export default function Home() {
       mode: modeOf(r.fields),
       status: r.fields[COL.status] || "Scheduled",
       notes: r.fields[COL.notes] || "",
+      followupStart: r.fields[COL.followupStart] || r.fields[COL.date] || "",
+      followupDay: r.fields[COL.followupDay] ? Number(r.fields[COL.followupDay]) : 1,
+      ticketId: r.fields[COL.ticketId] || "",
     });
     setTab("appointments");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1568,7 +1612,11 @@ export default function Home() {
   }
 
   function exportCSV() {
-    const headers = ["Patient Name", "Email", "Phone", "Date", "Time", "Doctor", "Mode", "Status", "Zoom URL"];
+    const headers = [
+      "Patient Name", "Email", "Phone", "Date", "Time", "Doctor", "Status", "Ticket ID",
+      "Mode", "Blood Group", "Age", "Gender", "Medical Notes", "Follow-up Start", "Follow-up Day",
+      "Zoom Meeting ID", "Zoom Join URL", "Google Calendar Event ID"
+    ];
     const rows = filteredAppointments.map(r => [
       `"${r.fields[COL.name] || ""}"`,
       `"${r.fields[COL.email] || ""}"`,
@@ -1576,9 +1624,18 @@ export default function Home() {
       `"${r.fields[COL.date] || ""}"`,
       `"${r.fields[COL.time] || ""}"`,
       `"${r.fields[COL.doctor] || ""}"`,
+      `"${r.fields[COL.status] || ""}"`,
+      `"${r.fields[COL.ticketId] || ""}"`,
       `"${modeOf(r.fields)}"`,
-      `"${r.fields[COL.status] || "Scheduled"}"`,
+      `"${r.fields[COL.bloodGroup] || ""}"`,
+      `"${r.fields[COL.age] || ""}"`,
+      `"${r.fields[COL.gender] || ""}"`,
+      `"${(r.fields[COL.notes] || "").replace(/"/g, '""')}"`,
+      `"${r.fields[COL.followupStart] || ""}"`,
+      `"${r.fields[COL.followupDay] || ""}"`,
+      `"${r.fields[COL.zoomId] || ""}"`,
       `"${r.fields[COL.zoomUrl] || ""}"`,
+      `"${r.fields[COL.calendarId] || ""}"`,
     ]);
     const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
     const encodedUri = encodeURI(csvContent);
@@ -1665,206 +1722,252 @@ export default function Home() {
   const unreadArtCount = artMessages.filter(m => !m.read && m.direction === "in").length;
 
   return (
-    <>
-      {/* HEADER */}
-      <header className="app-header">
-        <div className="brand-section">
-          <div className="brand-icon-box">
-            <IconCross size={18} />
-          </div>
-          <div>
-            <div className="brand-title">Clinic Desk</div>
-            <div className="brand-subtitle">
-              {isDoctorRole ? `Doctor Portal · ${user.doctorName || user.name}` : "Clinical Information Management"}
-            </div>
-          </div>
-        </div>
-
-        <div className="status-indicator-pill">
-          <span className="status-dot-pulse" />
-          <span>Services Operational</span>
-        </div>
-
-        {/* PRIMARY NAVIGATION TABS (DOCTORS ONLY SEE APPOINTMENTS & INBOX) */}
-        <nav className="header-nav">
-          <button
-            className={`nav-item-btn ${tab === "appointments" ? "active" : ""}`}
-            onClick={() => { setTab("appointments"); setSearch(""); }}
-          >
-            <IconCalendar size={13} />
-            <span>{isDoctorRole ? "My Appointments" : "Appointments"}</span>
-            <span className="nav-count-badge">{appointments.length}</span>
-          </button>
-          {!isDoctorRole && (
-            <button
-              className={`nav-item-btn ${tab === "patients" ? "active" : ""}`}
-              onClick={() => { setTab("patients"); setSearch(""); }}
-            >
-              <IconUsers size={13} />
-              <span>Patients</span>
-              <span className="nav-count-badge">{patients.length}</span>
-            </button>
-          )}
-          {!isDoctorRole && (
-            <button
-              className={`nav-item-btn ${tab === "doctors" ? "active" : ""}`}
-              onClick={() => { setTab("doctors"); setSearch(""); }}
-            >
-              <IconStethoscope size={13} />
-              <span>Specialists</span>
-              <span className="nav-count-badge">{doctorOptions.length}</span>
-            </button>
-          )}
-          <button
-            className={`nav-item-btn ${tab === "followups" ? "active" : ""}`}
-            onClick={() => setTab("followups")}
-          >
-            <IconInbox size={13} />
-            <span>{isDoctorRole ? "My Care Messages" : "Messages & Inbox"}</span>
-            <span className="nav-count-badge">{followupUpdates.length}</span>
-          </button>
-          <button
-            className={`nav-item-btn ${tab === "messages" ? "active" : ""}`}
-            onClick={() => setTab("messages")}
-          >
-            <IconMessageChat size={13} />
-            <span>{isDoctorRole ? "Staff Chat (ADK)" : "Live Staff Chat (ADK)"}</span>
-            {unreadArtCount > 0 ? (
-              <span className="nav-count-badge" style={{ backgroundColor: "var(--primary-600)", color: "#ffffff" }}>
-                {unreadArtCount}
-              </span>
-            ) : artStatus.startsWith("connected") ? (
-              <span className="nav-count-badge" style={{ backgroundColor: "#10b981", color: "#ffffff", padding: "0 6px" }}>Live</span>
-            ) : null}
-          </button>
-          {!isDoctorRole && (
-            <button
-              className={`nav-item-btn ${tab === "analytics" ? "active" : ""}`}
-              onClick={() => setTab("analytics")}
-            >
-              <IconAnalytics size={13} />
-              <span>Analytics</span>
-            </button>
-          )}
-        </nav>
-
-        {/* USER PROFILE & ACTIONS */}
-        <div className="header-user-area">
-          <div className="user-profile-badge">
-            <div className="user-avatar-circle">
-              {(user.doctorName || user.name || "U").slice(0, 1).toUpperCase()}
+    <div className="dashboard-app-canvas">
+      <div className="dashboard-frame">
+        {/* SIDEBAR (MEDICARE / HEALTH CARE_ STYLE) */}
+        <aside className="dashboard-sidebar">
+          {/* BRAND */}
+          <div className="sidebar-brand-block">
+            <div className="sidebar-brand-icon">
+              <IconCross size={18} />
             </div>
             <div>
-              <div className="user-name-label">{user.doctorName || user.name}</div>
-              <div className="user-role-label">{user.role === "doctor" ? "Physician" : "Front Desk"}</div>
+              <div className="sidebar-brand-name">Medicare Desk</div>
+              <div className="sidebar-brand-tag">
+                {isDoctorRole ? "Doctor Chamber" : "Clinical Center"}
+              </div>
             </div>
           </div>
-          <button className="btn-header-action" onClick={() => { setSettingsOpen(true); void testIntegrations(); }}>
-            <IconSettings size={13} />
-            <span>System</span>
-          </button>
-          <button className="btn-header-action" onClick={() => void signOut()}>
-            Sign out
-          </button>
-        </div>
-      </header>
 
-      {/* OVERVIEW BAR */}
-      <section className="overview-bar">
-        <div className="overview-content-row">
-          <div className="overview-title-block">
-            <h1>{isDoctorRole ? `${user.doctorName || user.name} · Consultations` : "Clinical Operations Overview"}</h1>
-            <p>
-              {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" })} · {isDoctorRole ? `Doctor Chamber · ${user.doctorName || user.name}` : `Logged in as ${user.name} (${user.role})`}
-            </p>
+          {/* DOCTOR / RECEPTIONIST PROFILE WIDGET (Image 2 Style) */}
+          <div className="sidebar-doctor-widget">
+            <div className="sidebar-doctor-avatar">
+              {(user.doctorName || user.name || "D").slice(0, 1).toUpperCase()}
+            </div>
+            <div className="sidebar-doctor-meta">
+              <div className="sidebar-doctor-name">{user.doctorName || user.name}</div>
+              <div className="sidebar-doctor-role">
+                {user.role === "doctor" ? "Physician · MD" : "Front Desk Coordinator"}
+              </div>
+            </div>
+            <div className="sidebar-status-dot" title="Account Active" />
           </div>
 
-          <div className="kpi-metrics-row">
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconCalendar size={12} />
-                <span>{isDoctorRole ? "My Consultations" : "Patients"}</span>
-              </div>
-              <div className="kpi-number">{isDoctorRole ? appointments.length : patients.length}</div>
-            </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconClock size={12} />
-                <span>Today's Visits</span>
-              </div>
-              <div className="kpi-number">{todayAppointments.length}</div>
-            </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconVideo size={12} />
-                <span>Telehealth</span>
-              </div>
-              <div className="kpi-number">{onlineUpcoming.length}</div>
-            </div>
-            <div className="kpi-metric-box">
-              <div className="kpi-label">
-                <IconInbox size={12} />
-                <span>Care Messages</span>
-              </div>
-              <div className="kpi-number">{followupUpdates.length}</div>
-            </div>
-          </div>
-        </div>
-
-        {/* ACTION SUBBAR */}
-        <div className="action-subbar">
-          <div className="action-btn-cluster">
+          {/* NAVIGATION MENU */}
+          <nav className="sidebar-nav-menu">
+            <div className="sidebar-nav-heading">Clinical Menu</div>
             <button
-              className="btn-primary"
-              onClick={() => {
-                setTab("appointments");
-                setEditingAppt(null);
-                setAppt({ patient: "", doctor: isDoctorRole ? (user.doctorName || "") : "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
-              }}
+              type="button"
+              className={`sidebar-nav-link ${tab === "appointments" ? "active" : ""}`}
+              onClick={() => { setTab("appointments"); setSearch(""); }}
             >
-              <IconCross size={13} />
-              <span>{isDoctorRole ? "New Consultation" : "Book Appointment"}</span>
+              <div className="sidebar-link-icon"><IconCalendar size={15} /></div>
+              <span className="sidebar-link-text">{isDoctorRole ? "My Consultations" : "Appointments"}</span>
+              <span className="sidebar-link-badge">{appointments.length}</span>
             </button>
             {!isDoctorRole && (
               <button
-                className="btn-secondary"
-                onClick={() => {
-                  setTab("patients");
-                  setEditingPatient(null);
-                  setPatientForm({ name: "", email: "", phone: "", bloodGroup: "", notes: "", age: "", gender: "Other" });
-                }}
+                type="button"
+                className={`sidebar-nav-link ${tab === "patients" ? "active" : ""}`}
+                onClick={() => { setTab("patients"); setSearch(""); }}
               >
-                <IconUsers size={13} />
-                <span>Register Patient</span>
+                <div className="sidebar-link-icon"><IconUsers size={15} /></div>
+                <span className="sidebar-link-text">Patients</span>
+                <span className="sidebar-link-badge">{patients.length}</span>
               </button>
             )}
-            <button className="btn-secondary" onClick={exportCSV}>
-              <IconDownload size={13} />
-              <span>Export CSV</span>
+            {!isDoctorRole && (
+              <button
+                type="button"
+                className={`sidebar-nav-link ${tab === "doctors" ? "active" : ""}`}
+                onClick={() => { setTab("doctors"); setSearch(""); }}
+              >
+                <div className="sidebar-link-icon"><IconStethoscope size={15} /></div>
+                <span className="sidebar-link-text">Specialists</span>
+                <span className="sidebar-link-badge">{doctorOptions.length}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className={`sidebar-nav-link ${tab === "followups" ? "active" : ""}`}
+              onClick={() => setTab("followups")}
+            >
+              <div className="sidebar-link-icon"><IconInbox size={15} /></div>
+              <span className="sidebar-link-text">{isDoctorRole ? "My Messages" : "Care Messages"}</span>
+              <span className="sidebar-link-badge">{followupUpdates.length}</span>
             </button>
-            <button className="btn-secondary" onClick={() => window.print()}>
-              <IconPrinter size={13} />
-              <span>Print Schedule</span>
+            <button
+              type="button"
+              className={`sidebar-nav-link ${tab === "messages" ? "active" : ""}`}
+              onClick={() => setTab("messages")}
+            >
+              <div className="sidebar-link-icon"><IconMessageChat size={15} /></div>
+              <span className="sidebar-link-text">{isDoctorRole ? "Staff Chat" : "Staff Chat (ADK)"}</span>
+              {unreadArtCount > 0 ? (
+                <span className="sidebar-link-badge unread">{unreadArtCount}</span>
+              ) : artStatus.startsWith("connected") ? (
+                <span className="sidebar-link-badge live">Live</span>
+              ) : null}
             </button>
+            {!isDoctorRole && (
+              <button
+                type="button"
+                className={`sidebar-nav-link ${tab === "analytics" ? "active" : ""}`}
+                onClick={() => setTab("analytics")}
+              >
+                <div className="sidebar-link-icon"><IconAnalytics size={15} /></div>
+                <span className="sidebar-link-text">Analytics</span>
+              </button>
+            )}
+          </nav>
+
+          {/* BOTTOM WIDGET (Image 1 / Image 2 Style Promo Card) */}
+          <div className="sidebar-promo-widget">
+            <div className="promo-badge-tag">Airtable Live</div>
+            <div className="promo-title">Clinical Desk Pro</div>
+            <div className="promo-subtitle">Real-time Freshdesk & Telehealth Sync</div>
+            <div className="sidebar-utility-row">
+              <button
+                type="button"
+                className="sidebar-utility-btn"
+                onClick={() => { setSettingsOpen(true); void testIntegrations(); }}
+              >
+                <IconSettings size={12} />
+                <span>System</span>
+              </button>
+              <button
+                type="button"
+                className="sidebar-utility-btn signout"
+                onClick={() => void signOut()}
+              >
+                Sign out
+              </button>
+            </div>
           </div>
+        </aside>
 
-          <button className="btn-secondary" onClick={() => void loadRecords()} disabled={busy}>
-            <IconRefresh size={12} />
-            <span>{busy ? "Refreshing…" : "Sync"}</span>
-          </button>
-        </div>
-      </section>
+        {/* MAIN DASHBOARD CONTENT AREA */}
+        <div className="dashboard-main-area">
+          {/* TOPBAR */}
+          <header className="dashboard-topbar">
+            <div className="topbar-left-meta">
+              <div className="topbar-breadcrumbs">
+                <span>Medicare</span> <span>›</span> <span className="crumb-active">{tab.charAt(0).toUpperCase() + tab.slice(1)}</span>
+              </div>
+              <h1 className="topbar-main-title">
+                {tab === "appointments" ? (isDoctorRole ? "Doctor Consultation Roster" : "Consultations & Schedule") :
+                 tab === "patients" ? "Patient Directory & History" :
+                 tab === "doctors" ? "Medical Specialists Roster" :
+                 tab === "followups" ? "Care Inbox & Freshdesk" :
+                 tab === "messages" ? "Live Staff Chat (ADK)" : "Clinical Operations Analytics"}
+              </h1>
+            </div>
 
-      {/* WORKSPACE CONTENT */}
-      <main className="main-workspace-container">
-        {toast && (
-          <div className="system-toast-banner" role="status">
-            <span>{toast}</span>
-            <button className="toast-dismiss-btn" onClick={() => setToast("")}>×</button>
-          </div>
-        )}
+            {/* ACTION PILL BUTTONS (IMAGE 1 STYLE) */}
+            <div className="topbar-action-group">
+              <button
+                type="button"
+                className="pill-btn-primary"
+                onClick={() => {
+                  setTab("appointments");
+                  setEditingAppt(null);
+                  setAppt({
+                    patient: "",
+                    doctor: isDoctorRole ? (user.doctorName || "") : "",
+                    date: isoDate(),
+                    time: null,
+                    mode: "Online",
+                    status: "Scheduled",
+                    notes: "",
+                    followupStart: isoDate(),
+                    followupDay: 1,
+                    ticketId: "",
+                  });
+                }}
+              >
+                <IconCross size={13} />
+                <span>{isDoctorRole ? "New Visit" : "Book Appointment"}</span>
+              </button>
 
-        {/* TAB 1: APPOINTMENTS */}
+              {!isDoctorRole && (
+                <button
+                  type="button"
+                  className="pill-btn-secondary"
+                  onClick={() => {
+                    setTab("patients");
+                    setEditingPatient(null);
+                    setPatientForm({ name: "", email: "", phone: "", bloodGroup: "", notes: "", age: "", gender: "Other" });
+                  }}
+                >
+                  <IconUsers size={13} />
+                  <span>Register Patient</span>
+                </button>
+              )}
+
+              <button type="button" className="pill-btn-secondary" onClick={exportCSV}>
+                <IconDownload size={13} />
+                <span>Export CSV</span>
+              </button>
+
+              <button
+                type="button"
+                className="pill-btn-secondary"
+                onClick={() => void loadRecords()}
+                disabled={busy}
+                title="Synchronize records with Airtable"
+              >
+                <IconRefresh size={12} />
+                <span>{busy ? "Syncing…" : "Sync"}</span>
+              </button>
+            </div>
+          </header>
+
+          {/* SIGNATURE 4-METRIC STRIP WITH VERTICAL ACCENT BARS (EXACT REPLICA OF IMAGE 1) */}
+          <section className="dashboard-metric-strip">
+            <div className="metric-strip-card">
+              <div className="metric-vertical-bar" style={{ backgroundColor: "#0f172a" }} />
+              <div className="metric-content">
+                <div className="metric-number-big">{isDoctorRole ? appointments.length : patients.length}</div>
+                <div className="metric-title-small">{isDoctorRole ? "My Consultations" : "Total Registered Patients"}</div>
+              </div>
+            </div>
+
+            <div className="metric-strip-card">
+              <div className="metric-vertical-bar" style={{ backgroundColor: "#06b6d4" }} />
+              <div className="metric-content">
+                <div className="metric-number-big">{todayAppointments.length}</div>
+                <div className="metric-title-small">Today's Visits</div>
+              </div>
+            </div>
+
+            <div className="metric-strip-card">
+              <div className="metric-vertical-bar" style={{ backgroundColor: "#0284c7" }} />
+              <div className="metric-content">
+                <div className="metric-number-big">{onlineUpcoming.length}</div>
+                <div className="metric-title-small">Telehealth Online</div>
+              </div>
+            </div>
+
+            <div className="metric-strip-card">
+              <div className="metric-vertical-bar" style={{ backgroundColor: "#ef4444" }} />
+              <div className="metric-content">
+                <div className="metric-number-big">{followupUpdates.length}</div>
+                <div className="metric-title-small">Care Messages & Inbox</div>
+              </div>
+            </div>
+          </section>
+
+          {/* TOAST BANNER */}
+          {toast && (
+            <div className="system-toast-banner" role="status">
+              <span>{toast}</span>
+              <button className="toast-dismiss-btn" onClick={() => setToast("")}>×</button>
+            </div>
+          )}
+
+          {/* WORKSPACE BODY HOLDING ALL TABS */}
+          <main className="dashboard-workspace-body">
+            {/* TAB 1: APPOINTMENTS */}
         {tab === "appointments" && (
           <div>
             {/* Filter Row */}
@@ -2063,7 +2166,7 @@ export default function Home() {
                 </div>
 
                 <div className="form-field-group">
-                  <label className="form-label">Clinical Notes / Reason</label>
+                  <label className="form-label">Medical Notes / Clinical Reason</label>
                   <input
                     placeholder="Chief complaint or diagnosis notes"
                     value={appt.notes}
@@ -2071,17 +2174,47 @@ export default function Home() {
                   />
                 </div>
 
-                {editingAppt && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
                   <div className="form-field-group">
-                    <label className="form-label">Status</label>
-                    <select
-                      value={appt.status}
-                      onChange={e => setAppt({ ...appt, status: e.target.value })}
-                    >
-                      <option value="Scheduled">Scheduled</option>
-                      <option value="Completed">Completed</option>
-                      <option value="Cancelled">Cancelled</option>
-                    </select>
+                    <label className="form-label">Follow-up Start Date</label>
+                    <input
+                      type="date"
+                      value={appt.followupStart || appt.date}
+                      onChange={e => setAppt({ ...appt, followupStart: e.target.value })}
+                    />
+                  </div>
+                  <div className="form-field-group">
+                    <label className="form-label">Follow-up Day (Number)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={appt.followupDay ?? 1}
+                      onChange={e => setAppt({ ...appt, followupDay: Number(e.target.value) || 1 })}
+                    />
+                  </div>
+                </div>
+
+                {editingAppt && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                    <div className="form-field-group">
+                      <label className="form-label">Status</label>
+                      <select
+                        value={appt.status}
+                        onChange={e => setAppt({ ...appt, status: e.target.value })}
+                      >
+                        <option value="Scheduled">Scheduled</option>
+                        <option value="Completed">Completed</option>
+                        <option value="Cancelled">Cancelled</option>
+                      </select>
+                    </div>
+                    <div className="form-field-group">
+                      <label className="form-label">Freshdesk Ticket ID</label>
+                      <input
+                        placeholder="Auto-filled on email dispatch"
+                        value={appt.ticketId || ""}
+                        onChange={e => setAppt({ ...appt, ticketId: e.target.value })}
+                      />
+                    </div>
                   </div>
                 )}
 
@@ -2095,7 +2228,18 @@ export default function Home() {
                       className="btn-cancel-plain"
                       onClick={() => {
                         setEditingAppt(null);
-                        setAppt({ patient: "", doctor: "", date: isoDate(), time: null, mode: "Online", status: "Scheduled", notes: "" });
+                        setAppt({
+                          patient: "",
+                          doctor: "",
+                          date: isoDate(),
+                          time: null,
+                          mode: "Online",
+                          status: "Scheduled",
+                          notes: "",
+                          followupStart: isoDate(),
+                          followupDay: 1,
+                          ticketId: "",
+                        });
                       }}
                     >
                       Cancel
@@ -2167,6 +2311,21 @@ export default function Home() {
                                 <span>Email: {r.fields[COL.email]}</span>
                               </span>
                             )}
+                            {r.fields[COL.ticketId] && (
+                              <span className="item-meta-segment" style={{ color: "var(--primary-700)", fontWeight: 600, backgroundColor: "var(--primary-50)", padding: "1px 6px", borderRadius: "4px" }}>
+                                <span>Ticket #{r.fields[COL.ticketId]}</span>
+                              </span>
+                            )}
+                            {(r.fields[COL.followupDay] || r.fields[COL.followupStart]) && (
+                              <span className="item-meta-segment" style={{ fontSize: "11px", color: "var(--ink-600)" }}>
+                                <span>Follow-up Day {r.fields[COL.followupDay] || 1}{r.fields[COL.followupStart] ? ` (${r.fields[COL.followupStart]})` : ""}</span>
+                              </span>
+                            )}
+                            {(r.fields[COL.gender] || r.fields[COL.bloodGroup] || r.fields[COL.age]) && (
+                              <span className="item-meta-segment" style={{ fontSize: "11px", color: "var(--ink-500)" }}>
+                                <span>{[r.fields[COL.gender], r.fields[COL.age] ? `${r.fields[COL.age]}y` : "", r.fields[COL.bloodGroup]].filter(Boolean).join(" · ")}</span>
+                              </span>
+                            )}
                           </div>
 
                           {r.fields[COL.notes] && (
@@ -2232,10 +2391,17 @@ export default function Home() {
                                 void sendAppointmentEmail(r).then((res) => {
                                   const doc = r.fields[COL.doctor];
                                   const patient = r.fields[COL.name];
-                                  if (res?.ok && doc) {
-                                    setToast(`Appointment notice transmitted to ${patient} and ${doc}.`);
-                                  } else {
-                                    setToast(`Appointment notice transmitted to ${patient}.`);
+                                  if (res?.ok) {
+                                    if (res.patientTicketId) {
+                                      const tid = String(res.patientTicketId);
+                                      setRecords(old => old.map(item => item.id === r.id ? { ...item, fields: { ...item.fields, [COL.ticketId]: tid } } : item));
+                                    }
+                                    const ticketTag = res.patientTicketId ? ` (Ticket #${res.patientTicketId})` : "";
+                                    if (doc) {
+                                      setToast(`Appointment notice transmitted to ${patient} and ${doc}${ticketTag}.`);
+                                    } else {
+                                      setToast(`Appointment notice transmitted to ${patient}${ticketTag}.`);
+                                    }
                                   }
                                 }).finally(() => setSendingMessageFor(null));
                               }}
@@ -2437,7 +2603,19 @@ export default function Home() {
                 />
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
+                <div className="form-field-group">
+                  <label className="form-label">Gender</label>
+                  <select
+                    value={patientForm.gender}
+                    onChange={e => setPatientForm({ ...patientForm, gender: e.target.value })}
+                  >
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
                 <div className="form-field-group">
                   <label className="form-label">Blood Group</label>
                   <select
@@ -2551,12 +2729,19 @@ export default function Home() {
                         <div style={{ fontSize: "12px", color: "var(--ink-700)", marginTop: "8px", display: "flex", flexDirection: "column", gap: "2px" }}>
                           <div>Email: {p.fields[COL.email] || "None on record"}</div>
                           <div>Phone: {p.fields[COL.phone] || "None on record"}</div>
-                          {p.fields[COL.bloodGroup] && (
-                            <div>Blood Group: <strong>{p.fields[COL.bloodGroup]}</strong></div>
+                          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
+                            {p.fields[COL.gender] && <span>Gender: <strong>{p.fields[COL.gender]}</strong></span>}
+                            {p.fields[COL.age] && <span>Age: <strong>{p.fields[COL.age]} yrs</strong></span>}
+                            {p.fields[COL.bloodGroup] && <span>Blood Group: <strong>{p.fields[COL.bloodGroup]}</strong></span>}
+                          </div>
+                          {(p.fields[COL.followupDay] || p.fields[COL.followupStart]) && (
+                            <div style={{ fontSize: "11px", color: "var(--ink-600)", marginTop: "2px" }}>
+                              Follow-up: Day {p.fields[COL.followupDay] || "1"} {p.fields[COL.followupStart] ? `(Started ${p.fields[COL.followupStart]})` : ""}
+                            </div>
                           )}
                           {p.fields[COL.notes] && (
                             <div style={{ marginTop: "4px", padding: "4px 6px", backgroundColor: "var(--surface-subtle)", borderRadius: "4px", fontSize: "11px", color: "var(--ink-700)" }}>
-                              {p.fields[COL.notes]}
+                              <strong>Medical Notes:</strong> {p.fields[COL.notes]}
                             </div>
                           )}
                         </div>
@@ -3168,7 +3353,9 @@ export default function Home() {
             </div>
           </div>
         )}
-      </main>
+          </main>
+        </div>
+      </div>
 
       {/* SYSTEM INTEGRATIONS MODAL */}
       {settingsOpen && (
@@ -3266,6 +3453,6 @@ export default function Home() {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { listClinicDoctors, loadClinicAccounts, readClinicSession } from "@/lib/auth";
 import { createAppointmentActionToken, createFollowupTicket, escapeHtml } from "@/lib/followups";
-import { airtableRequest, COL } from "@/lib/airtable";
+import { airtableRequest, COL, saveAirtableRecord } from "@/lib/airtable";
 
 export const runtime = "nodejs";
 
@@ -280,6 +280,17 @@ export async function POST(request: Request) {
         "patient_notification",
       ],
     });
+
+    // Auto-fill Ticket ID in Airtable as soon as email is sent
+    if (appointmentId && patientTicket?.id) {
+      try {
+        await saveAirtableRecord(appointmentId, {
+          [COL.ticketId]: String(patientTicket.id),
+        });
+      } catch (ticketSaveErr) {
+        console.warn("Could not auto-fill Ticket ID in Airtable appointment:", ticketSaveErr);
+      }
+    }
 
     // 8. Dispatch Doctor Notification Ticket (Freshdesk emails Doctor directly as Requester)
     let doctorTicket: any = null;

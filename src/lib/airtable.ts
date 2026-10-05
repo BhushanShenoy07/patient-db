@@ -18,6 +18,9 @@ export const COL = {
   calendarId: "Google Calendar Event ID",
   followupDay: "Follow-up Day",
   followupStart: "Follow-up Start",
+  ticketId: "Ticket ID",
+  createdTime: "Created Time",
+  lastModifiedTime: "Last Modified Time",
 } as const;
 
 function hasAirtableConfig() {
@@ -260,13 +263,49 @@ const mockStore: MockRecord[] = [
   },
 ];
 
+export const APPOINTMENTS_TABLE_ALLOWED_FIELDS = new Set([
+  "Patient Name",
+  "Patient Email",
+  "Phone No",
+  "Appointment Date",
+  "Appointment Time",
+  "Doctor",
+  "Status",
+  "Ticket ID",
+  "Zoom Meeting ID",
+  "Zoom Join URL",
+  "Google Calendar Event ID",
+  "Mode",
+  "Blood Group",
+  "Medical Notes",
+  "Age",
+  "Gender",
+  "Follow-up Start",
+  "Follow-up Day",
+]);
+
+export const PATIENTS_TABLE_ALLOWED_FIELDS = new Set([
+  "Patient Name",
+  "Patient Email",
+  "Phone No",
+  "Age",
+  "Gender",
+  "Blood Group",
+  "Medical Notes",
+]);
+
 export function isAirtableLive() {
   return hasAirtableConfig();
 }
 
-export async function airtableRequest(path = "", init: RequestInit = {}) {
+function patientsTableId() {
+  return process.env.AIRTABLE_PATIENTS_TABLE_ID?.trim() || "tblP3i2fS5SRkdkx9";
+}
+
+export async function airtableRequest(path = "", init: RequestInit = {}, tableOverride?: string) {
   const c = config();
-  const response = await fetch(`${apiRoot}/${c.base}/${encodeURIComponent(c.table)}${path}`, {
+  const table = tableOverride || c.table;
+  const response = await fetch(`${apiRoot}/${c.base}/${encodeURIComponent(table)}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${c.token}`, "Content-Type": "application/json", ...init.headers },
     cache: "no-store",
@@ -283,28 +322,98 @@ export async function airtableRequest(path = "", init: RequestInit = {}) {
   return body;
 }
 
+async function fetchTableRecords(tableId: string): Promise<any[]> {
+  let records: any[] = [];
+  let offset = "";
+  do {
+    const query = new URLSearchParams({ pageSize: "100" });
+    if (offset) query.set("offset", offset);
+    const page = await airtableRequest(`?${query}`, {}, tableId);
+    records = records.concat(page.records || []);
+    offset = page.offset || "";
+  } while (offset);
+  return records;
+}
+
 export async function listAirtableRecords() {
   if (hasAirtableConfig()) {
     try {
-      let records: any[] = [];
-      let offset = "";
-      do {
-        const query = new URLSearchParams({ pageSize: "100" });
-        if (offset) query.set("offset", offset);
-        const page = await airtableRequest(`?${query}`);
-        records = records.concat(page.records || []);
-        offset = page.offset || "";
-      } while (offset);
-      return records;
+      const c = config();
+      const apptRecords = await fetchTableRecords(c.table);
+
+      let patientRecords: any[] = [];
+      const ptId = patientsTableId();
+      if (ptId) {
+        try {
+          patientRecords = await fetchTableRecords(ptId);
+        } catch (e) {
+          console.warn("Could not load Patients table:", e instanceof Error ? e.message : e);
+        }
+      }
+
+      // Map patient demographics from Patients table
+      const demographicsMap = new Map<string, Record<string, any>>();
+      for (const pr of patientRecords) {
+        const pf = pr.fields || {};
+        const key = String(pf["Patient Email"] || pf["Email"] || pf["Patient Name"] || "").trim().toLowerCase();
+        if (key) demographicsMap.set(key, { ...pf, _patientId: pr.id });
+      }
+
+      // Merge demographics into appointments
+      const enriched = apptRecords.map((r: any) => {
+        const rf = r.fields || {};
+        const key = String(rf["Patient Email"] || rf["Email"] || rf["Patient Name"] || "").trim().toLowerCase();
+        const demo = demographicsMap.get(key);
+        if (demo) {
+          return {
+            ...r,
+            fields: {
+              Age: demo.Age || rf.Age || "",
+              Gender: demo.Gender || rf.Gender || "Other",
+              "Blood Group": demo["Blood Group"] || rf["Blood Group"] || "",
+              "Medical Notes": demo["Medical Notes"] || rf["Medical Notes"] || "",
+              ...rf,
+            },
+          };
+        }
+        return r;
+      });
+
+      // Include standalone registered patients from Patients table
+      const apptKeys = new Set(
+        apptRecords.map((r: any) =>
+          String(r.fields?.["Patient Email"] || r.fields?.["Email"] || r.fields?.["Patient Name"] || "").trim().toLowerCase()
+        )
+      );
+
+      for (const pr of patientRecords) {
+        const pf = pr.fields || {};
+        const key = String(pf["Patient Email"] || pf["Email"] || pf["Patient Name"] || "").trim().toLowerCase();
+        if (key && !apptKeys.has(key)) {
+          enriched.push({
+            id: pr.id,
+            createdTime: pr.createdTime,
+            fields: {
+              ...pf,
+              Status: pf.Status || "Registered",
+            },
+          });
+        }
+      }
+
+      return enriched;
     } catch (error) {
       console.warn("Airtable API unreachable or failed; using resilient local clinic store:", error instanceof Error ? error.message : "unknown");
     }
   }
-  // Return in-memory clinic store
   return JSON.parse(JSON.stringify(mockStore));
 }
 
-export async function saveAirtableRecord(id: string | null, fields: Record<string, unknown>) {
+export async function saveAirtableRecord(
+  id: string | null,
+  fields: Record<string, unknown>,
+  explicitTableId?: string
+) {
   const isUpdate = Boolean(id && !id.startsWith("patient:") && !id.startsWith("local:"));
   let currentId: string | null = isUpdate ? id : null;
 
@@ -327,31 +436,114 @@ export async function saveAirtableRecord(id: string | null, fields: Record<strin
     "Record ID",
   ]);
 
-  const values: Record<string, unknown> = { ...fields };
-  Object.keys(values).forEach(key => {
-    if (COMPUTED_FIELD_NAMES.has(key)) {
-      delete values[key];
-    } else if (values[key] === undefined) {
-      delete values[key];
-    } else if (values[key] === "") {
-      if (currentId) {
-        values[key] = null; // In Airtable PATCH, null clears the cell
-      } else {
-        delete values[key]; // In Airtable POST, omit empty values
+  // Strip computed / read-only fields
+  const rawValues: Record<string, unknown> = { ...fields };
+  for (const k of Object.keys(rawValues)) {
+    if (COMPUTED_FIELD_NAMES.has(k) || rawValues[k] === undefined) {
+      delete rawValues[k];
+    }
+  }
+
+  // Determine whether this is an Appointment or a Patient record
+  const isAppointment = Boolean(
+    rawValues["Appointment Date"] || rawValues["Appointment Time"] || rawValues["Doctor"]
+  );
+
+  const c = config();
+  const targetTable = explicitTableId || c.table;
+
+  // Strictly filter values according to table schema
+  const values: Record<string, unknown> = {};
+  if (targetTable === c.table) {
+    // Primary table (tblLSp4tTMNANmGjc) contains all 18 writable fields
+    for (const [k, v] of Object.entries(rawValues)) {
+      if (APPOINTMENTS_TABLE_ALLOWED_FIELDS.has(k)) {
+        if (k === "Follow-up Day") {
+          if (v === "" || v === null || v === undefined) {
+            if (currentId) values[k] = null;
+          } else {
+            const num = Number(v);
+            if (!isNaN(num)) values[k] = num;
+          }
+        } else if (k === "Appointment Date") {
+          if (v === "" || v === null || v === undefined) {
+            if (currentId) values[k] = null;
+          } else {
+            values[k] = String(v).slice(0, 10);
+          }
+        } else if (v === "" || v === null || v === undefined) {
+          if (currentId) values[k] = null;
+        } else {
+          values[k] = v;
+        }
       }
     }
-  });
+  } else {
+    // Secondary demographic table (tblP3i2fS5SRkdkx9) if explicitly targeted
+    for (const [k, v] of Object.entries(rawValues)) {
+      if (PATIENTS_TABLE_ALLOWED_FIELDS.has(k)) {
+        if (v === "" || v === null || v === undefined) {
+          if (currentId) values[k] = null;
+        } else {
+          values[k] = v;
+        }
+      }
+    }
+  }
 
   if (hasAirtableConfig()) {
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt < 20; attempt++) {
+    for (let attempt = 0; attempt < 10; attempt++) {
       try {
-        const result = await airtableRequest(currentId ? `/${encodeURIComponent(currentId)}` : "", {
-          method: currentId ? "PATCH" : "POST",
-          body: JSON.stringify({ fields: values, typecast: true }),
-        });
+        const result = await airtableRequest(
+          currentId ? `/${encodeURIComponent(currentId)}` : "",
+          {
+            method: currentId ? "PATCH" : "POST",
+            body: JSON.stringify({ fields: values, typecast: true }),
+          },
+          targetTable
+        );
 
-        // Also keep local mockStore in sync for fallback continuity
+        // If saving an appointment that also contains patient demographic fields (Age, Gender, Blood Group, Medical Notes),
+        // save those demographic fields to the Patients table in the background
+        if (isAppointment && hasAirtableConfig()) {
+          const demoFields: Record<string, unknown> = {};
+          if (rawValues["Patient Name"]) demoFields["Patient Name"] = rawValues["Patient Name"];
+          if (rawValues["Patient Email"]) demoFields["Patient Email"] = rawValues["Patient Email"];
+          if (rawValues["Phone No"]) demoFields["Phone No"] = rawValues["Phone No"];
+          if (rawValues["Age"]) demoFields["Age"] = rawValues["Age"];
+          if (rawValues["Gender"]) demoFields["Gender"] = rawValues["Gender"];
+          if (rawValues["Blood Group"]) demoFields["Blood Group"] = rawValues["Blood Group"];
+          if (rawValues["Medical Notes"]) demoFields["Medical Notes"] = rawValues["Medical Notes"];
+
+          if (Object.keys(demoFields).length > 3) {
+            void (async () => {
+              try {
+                const ptId = patientsTableId();
+                const existing = await fetchTableRecords(ptId);
+                const email = String(demoFields["Patient Email"] || "").toLowerCase().trim();
+                const matched = (existing || []).find(
+                  (r: any) => String(r.fields?.["Patient Email"] || "").toLowerCase().trim() === email
+                );
+                if (matched) {
+                  await airtableRequest(`/${encodeURIComponent(matched.id)}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ fields: demoFields, typecast: true }),
+                  }, ptId);
+                } else {
+                  await airtableRequest("", {
+                    method: "POST",
+                    body: JSON.stringify({ fields: demoFields, typecast: true }),
+                  }, ptId);
+                }
+              } catch {
+                // Background demographic sync notice
+              }
+            })();
+          }
+        }
+
+        // Keep local mockStore in sync for fallback continuity
         if (result?.id) {
           const idx = mockStore.findIndex(r => r.id === result.id || (currentId && r.id === currentId));
           if (idx >= 0) {
@@ -366,63 +558,40 @@ export async function saveAirtableRecord(id: string | null, fields: Record<strin
         const message = lastError.message || "";
         const status = (lastError as any).status;
 
-        // If the record ID was not found in Airtable (404 / NOT_FOUND / INVALID_RECORD_ID),
-        // it may be an in-memory/mock ID. Fallback to POST as a new record in Airtable!
+        // If ID not found (404), fall back to creating a new record
         if (currentId && (status === 404 || /NOT_FOUND|INVALID_RECORD_ID|Record not found/i.test(message))) {
-          console.warn(`Record ${currentId} not found in Airtable; persisting as a new record.`);
+          console.warn(`Record ${currentId} not found in ${targetTable}; persisting as new record.`);
           currentId = null;
           Object.keys(values).forEach(k => { if (values[k] === null || values[k] === "") delete values[k]; });
           continue;
         }
 
-        // Check for computed/read-only field error:
-        // "Field \"Created Time\" cannot accept a value because the field is computed"
+        // Check for computed field error
         const computedField =
           /Field "([^"]+)" cannot accept a value because the field is computed/i.exec(message)?.[1] ||
           /Cannot (?:modify|update) computed field "([^"]+)"/i.exec(message)?.[1] ||
           /Field "([^"]+)" [^"]*computed/i.exec(message)?.[1];
         if (computedField && Object.hasOwn(values, computedField)) {
-          console.warn(`Removing computed Airtable field "${computedField}" and retrying...`);
+          console.warn(`Removing computed field "${computedField}" and retrying...`);
           delete values[computedField];
           continue;
         }
 
         // Check for unknown field names
         const unknownField = /Unknown field name: "([^"]+)"/i.exec(message)?.[1];
-        if (unknownField && Object.hasOwn(values, unknownField) && unknownField !== "Patient Name") {
-          try {
-            const c = config();
-            const fieldType = unknownField === "Medical Notes" ? "multilineText"
-              : unknownField === "Appointment Date" ? "date"
-              : unknownField === "Follow-up Day" ? "number"
-              : "singleLineText";
-            const fieldBody: any = { name: unknownField, type: fieldType };
-            if (fieldType === "number") fieldBody.options = { precision: 0 };
-            const metaRes = await fetch(`${apiRoot}/meta/bases/${c.base}/tables/${encodeURIComponent(c.table)}/fields`, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${c.token}`, "Content-Type": "application/json" },
-              body: JSON.stringify(fieldBody),
-            });
-            if (metaRes.ok) {
-              console.log(`Auto-created missing Airtable field: "${unknownField}"`);
-              continue;
-            }
-          } catch {
-            // Ignore meta creation failure, fall back to omitting the field
-          }
-
+        if (unknownField && Object.hasOwn(values, unknownField)) {
+          console.warn(`Removing unmapped field "${unknownField}" from ${targetTable} and retrying...`);
           delete values[unknownField];
           continue;
         }
 
-        // Non-recoverable error, throw to break out
         throw lastError;
       }
     }
     if (lastError) throw lastError;
   }
 
-  // Fallback in-memory persistence when Airtable credentials are not configured
+  // In-memory fallback
   if (currentId) {
     const existingIndex = mockStore.findIndex(r => r.id === currentId);
     if (existingIndex >= 0) {
@@ -443,12 +612,24 @@ export async function saveAirtableRecord(id: string | null, fields: Record<strin
 
 export async function deleteAirtableRecord(id: string) {
   if (hasAirtableConfig()) {
+    const c = config();
     try {
-      await airtableRequest(`/${encodeURIComponent(id)}`, { method: "DELETE" });
+      // First try deleting from appointments table
+      await airtableRequest(`/${encodeURIComponent(id)}`, { method: "DELETE" }, c.table);
     } catch (error: any) {
       const status = error?.status;
       const message = error instanceof Error ? error.message : "";
-      if (status !== 404 && !/NOT_FOUND|INVALID_RECORD_ID|Record not found/i.test(message)) {
+      if (status === 404 || /NOT_FOUND|INVALID_RECORD_ID|Record not found/i.test(message)) {
+        // Try deleting from patients table
+        const ptId = patientsTableId();
+        if (ptId) {
+          try {
+            await airtableRequest(`/${encodeURIComponent(id)}`, { method: "DELETE" }, ptId);
+          } catch {
+            // Already gone
+          }
+        }
+      } else {
         throw error;
       }
     }
