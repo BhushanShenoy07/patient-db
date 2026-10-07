@@ -314,3 +314,10 @@ export function checkUser(_username: string) {
     void syncRelay(currentConfig.username);
   }
 }
+
+export function triggerPresenceSync() {
+  if (currentConfig) {
+    void syncRelay(currentConfig.username);
+  }
+}
+

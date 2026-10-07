@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { CLINIC_DOCTORS, doctorKey, sameDoctor } from "./auth";
 
 const key = () => {
   const secret = process.env.CLINIC_SESSION_SECRET?.trim();
@@ -294,12 +295,178 @@ declare global {
 const TICKETS_CACHE_TTL = 30_000; // 30s cache window to comfortably stay under Freshdesk 50 req/min limit
 const DISK_CACHE_PATH = path.join(process.cwd(), ".cache", "clinic_tickets.json");
 
+export function isClinicalTicket(t: any): boolean {
+  const email = (t.requester?.email || t.email || "").toLowerCase();
+  const name = (t.requester?.name || t.name || "").toLowerCase();
+  const subject = (t.subject || "").toLowerCase();
+  const rawBody = (t.description_text || t.description || "").toLowerCase();
+  const tags = (Array.isArray(t.tags) ? t.tags : []).map((x: any) => String(x).toLowerCase());
+
+  // 1. HARD BLOCKLIST: Non-clinical third-party automated / marketing / corporate mailers
+  const blockedSenders = [
+    "salesforce.com",
+    "slackhq.com",
+    "slack.com",
+    "hr@bixbytessolutions.com",
+    "hr@",
+    "careers@",
+    "recruiting@",
+    "jobs@",
+    "accounts.google.com",
+    "googleplay",
+    "googleone",
+    "zoom.us",
+    "naukri",
+    "gitguardian",
+    "github.com",
+    "vercel.com",
+    "airtable.com",
+    "bankofbaroda",
+    "freshservice.com",
+    "donotreply",
+    "no-reply",
+    "noreply",
+    "jioaicloud",
+    "pipedrive",
+    "linkedin.com",
+    "facebookmail.com",
+    "atlassian.com"
+  ];
+
+  if (blockedSenders.some(b => email.includes(b))) {
+    return false;
+  }
+
+  // 2. HARD BLOCKLIST for non-clinical subjects (passwords, OTPs, webinars, holidays, etc.)
+  if (
+    subject.includes("salesforce") ||
+    subject.includes("password") ||
+    subject.includes("webinar") ||
+    subject.includes("roadmap preview") ||
+    subject.includes("dasara") ||
+    subject.includes("celebrate") ||
+    subject.includes("verification otp") ||
+    subject.includes("email verification") ||
+    subject.includes("ticket received -") ||
+    subject.includes("statement") ||
+    subject.includes("invoice") ||
+    subject.includes("newsletter") ||
+    /\binc-\d+\b/i.test(subject)
+  ) {
+    return false;
+  }
+
+  // 3. POSITIVE CLINICAL QUALIFICATION:
+  // Must be linked to clinic appointments, consultations, health checks, or care feedback
+  const hasClinicTag = tags.some((tag: string) =>
+    tag.startsWith("clinic_") ||
+    tag.startsWith("appointment_") ||
+    tag === "patient_notification" ||
+    tag === "doctor_notification" ||
+    tag === "online" ||
+    tag === "offline"
+  );
+
+  const hasClinicSubject =
+    subject.includes("clinic desk") ||
+    subject.includes("telehealth consultation") ||
+    subject.includes("in-person consultation") ||
+    subject.includes("consultation confirmed") ||
+    subject.includes("appointment cancellation") ||
+    subject.includes("new consultation scheduled") ||
+    subject.includes("consultation cancelled") ||
+    subject.includes("health check") ||
+    subject.includes("health change reported") ||
+    subject.includes("patient follow-up feedback") ||
+    /re:\s*clinic desk/i.test(subject);
+
+  const hasClinicBody =
+    rawBody.includes("clinic desk") ||
+    rawBody.includes("telehealth consultation") ||
+    rawBody.includes("in-person clinic visit") ||
+    rawBody.includes("in-person consultation") ||
+    rawBody.includes("attending physician") ||
+    rawBody.includes("attending doctor") ||
+    rawBody.includes("consultation mode") ||
+    rawBody.includes("doctor rating") ||
+    rawBody.includes("clinical consultation");
+
+  return hasClinicTag || hasClinicSubject || hasClinicBody;
+}
+
+export function extractAttendingDoctor(ticket: {
+  subject?: string;
+  message?: string;
+  description?: string;
+  description_text?: string;
+  tags?: string[];
+  conversations?: any[];
+}): string | null {
+  const subject = ticket.subject || "";
+  const body = ticket.description_text || ticket.description || ticket.message || "";
+  const fullText = `${subject} ${body} ${(ticket.tags || []).join(" ")}`;
+
+  // 1. Check "with Dr. <Name>" or "with <Name>" in subject
+  const withMatch = subject.match(/\bwith\s+(Dr\.?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+  if (withMatch) {
+    const raw = withMatch[1].trim();
+    const matched = CLINIC_DOCTORS.find(d => sameDoctor(d.name, raw));
+    if (matched) return matched.name;
+    return raw.startsWith("Dr.") ? raw : `Dr. ${raw}`;
+  }
+
+  // 2. Check "Attending Physician: <Name>" or "Physician: <Name>" or "Doctor: <Name>"
+  const labelMatch = fullText.match(/(?:Attending\s+(?:Doctor|Physician)|Physician|Doctor):\s*<strong>?(Dr\.?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?|[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+  if (labelMatch) {
+    const raw = labelMatch[1].trim();
+    const matched = CLINIC_DOCTORS.find(d => sameDoctor(d.name, raw));
+    if (matched) return matched.name;
+  }
+
+  // 3. Check "In care partnership with Dr. <Name>" or "visit with Dr. <Name>"
+  const partnerMatch = fullText.match(/(?:In care partnership with|visit with)\s+(Dr\.?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+  if (partnerMatch) {
+    const raw = partnerMatch[1].trim();
+    const matched = CLINIC_DOCTORS.find(d => sameDoctor(d.name, raw));
+    if (matched) return matched.name;
+  }
+
+  // 4. Check known clinic doctors in text
+  const lowText = fullText.toLowerCase();
+  for (const doc of CLINIC_DOCTORS) {
+    const key = doctorKey(doc.name);
+    if (key && lowText.includes(key)) {
+      return doc.name;
+    }
+  }
+
+  // 5. Check if any reply in conversations was sent by a doctor
+  for (const c of ticket.conversations || []) {
+    const sentMatch = (c.message || "").match(/— Sent by (Dr\.?\s+[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+    if (sentMatch) {
+      const sender = sentMatch[1].trim();
+      const matched = CLINIC_DOCTORS.find(d => sameDoctor(d.name, sender));
+      if (matched) return matched.name;
+      return sender;
+    }
+  }
+
+  return null;
+}
+
 function getTicketsFromDisk(): any[] {
   try {
     if (fs.existsSync(DISK_CACHE_PATH)) {
       const raw = fs.readFileSync(DISK_CACHE_PATH, "utf8");
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed
+          .filter(isClinicalTicket)
+          .map(t => ({
+            ...t,
+            attendingDoctor: t.attendingDoctor || extractAttendingDoctor(t),
+          }));
+      }
     }
   } catch {}
   return [];
@@ -385,43 +552,7 @@ export async function getClinicTicketsWithConversations(limit = 30) {
       return getTicketsFromDisk();
     }
 
-    const clinicTickets = (tickets || []).filter((t: any) => {
-      const email = (t.requester?.email || t.email || "").toLowerCase();
-      const name = (t.requester?.name || t.name || "").toLowerCase();
-      const subject = (t.subject || "").toLowerCase();
-
-      // Zoom automated notifications
-      if (email.includes("zoom.us") || name === "zoom" || subject.includes("your meeting -") || subject.includes("has joined your meeting")) {
-        return false;
-      }
-      // Freshservice / helpdesk automated receipts & loop notices
-      if (email.includes("freshservice.com") || subject.includes("ticket received -") || /\binc-\d+\b/i.test(subject)) {
-        return false;
-      }
-      // Third-party bots & OTP mailers
-      if (
-        email.includes("donotreply") ||
-        email.includes("no-reply") ||
-        email.includes("noreply") ||
-        email.includes("jioaicloud") ||
-        email.includes("pipedrive") ||
-        email.includes("naukri") ||
-        email.includes("gitguardian") ||
-        email.includes("slack.com") ||
-        email.includes("vercel.com") ||
-        email.includes("airtable.com") ||
-        email.includes("bankofbaroda") ||
-        email.includes("accounts.google.com") ||
-        email.includes("googleplay") ||
-        email.includes("googleone")
-      ) {
-        return false;
-      }
-      if (subject.includes("verification otp") || subject.includes("email verification")) {
-        return false;
-      }
-      return true;
-    });
+    const clinicTickets = (tickets || []).filter(isClinicalTicket);
 
     const enriched = await Promise.all(
       clinicTickets.map(async (t: any) => {
@@ -466,6 +597,15 @@ export async function getClinicTicketsWithConversations(limit = 30) {
           .replace(/\s+/g, " ")
           .trim();
 
+        const attendingDoctor = extractAttendingDoctor({
+          subject: t.subject,
+          description: t.description,
+          description_text: t.description_text,
+          message: cleanBody,
+          tags: Array.isArray(t.tags) ? t.tags : [],
+          conversations,
+        });
+
         return {
           id: String(t.id),
           subject: t.subject || "Clinic Consultation",
@@ -480,6 +620,7 @@ export async function getClinicTicketsWithConversations(limit = 30) {
           tags: Array.isArray(t.tags) ? t.tags : [],
           hasReplies: hasRealReplies || conversations.length > 0,
           conversations,
+          attendingDoctor,
         };
       })
     );

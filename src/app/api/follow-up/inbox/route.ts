@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readClinicSession } from "@/lib/auth";
+import { readClinicSession, sameDoctor } from "@/lib/auth";
 import { getClinicTicketsWithConversations, invalidateTicketsCache, replyToFreshdeskTicket } from "@/lib/followups";
 
 export const runtime = "nodejs";
@@ -25,43 +25,26 @@ export async function GET(request: Request) {
               return false;
             }
 
-            // 2. Doctor relevance: must pertain to this doctor
-            const text = `${u.subject} ${u.message} ${(u.tags || []).join(" ")}`.toLowerCase();
-            const convMatch = (u.conversations || []).some((c: { from?: string; message?: string }) =>
-              (c.from || "").toLowerCase().includes(docName) ||
-              (c.message || "").toLowerCase().includes(docName) ||
-              (c.from || "").toLowerCase().includes(docEmail)
-            );
-            const matchesDoctor = (docName && text.includes(docName)) || (docEmail && text.includes(docEmail)) || convMatch;
-            if (!matchesDoctor) return false;
-
-            // 3. Must be an actual message from the patient (not an unreplied system notification template)
-            const patientReplies = (u.conversations || []).filter((c: { incoming?: boolean; from?: string }) =>
-              Boolean(c.incoming) ||
-              (c.from &&
-                !c.from.toLowerCase().includes("reception") &&
-                !c.from.toLowerCase().includes("support@") &&
-                !c.from.toLowerCase().includes(docEmail) &&
-                !c.from.toLowerCase().includes(docName))
-            );
-
-            const isPatientFeedback =
-              (u.tags || []).some((t: string) => ["clinic_health_update", "clinic_followup_response", "clinic_appointment_action_request"].includes(t)) ||
-              /health change reported|patient follow-up feedback|health check/i.test(u.subject);
-
-            const isSystemTemplate =
-              (u.tags || []).includes("patient_notification") ||
-              /telehealth consultation confirmed|appointment cancellation notice|new consultation scheduled|consultation cancelled/i.test(u.subject);
-
-            // If it's an unreplied outgoing notification template, it has no message from patient yet
-            if (isSystemTemplate && patientReplies.length === 0) {
-              return false;
+            // 2. Doctor relevance: must strictly pertain to this specific doctor
+            if (u.attendingDoctor) {
+              if (!sameDoctor(u.attendingDoctor, session.doctorName)) {
+                return false;
+              }
+            } else {
+              const text = `${u.subject} ${u.message} ${(u.tags || []).join(" ")}`.toLowerCase();
+              const convMatch = (u.conversations || []).some((c: { from?: string; message?: string }) =>
+                (c.from || "").toLowerCase().includes(docName) ||
+                (c.message || "").toLowerCase().includes(docName) ||
+                (c.from || "").toLowerCase().includes(docEmail)
+              );
+              const matchesDoctor = (docName && text.includes(docName)) || (docEmail && text.includes(docEmail)) || convMatch;
+              if (!matchesDoctor) return false;
             }
 
             return true;
           })
           .map(u => {
-            // For doctor display: ensure patient message is highlighted
+            // Ensure patient message is highlighted when replies exist
             const patientReplies = (u.conversations || []).filter((c: { incoming?: boolean; from?: string; message?: string }) =>
               Boolean(c.incoming) ||
               (c.from &&

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readClinicSession } from "@/lib/auth";
+import { recordHeartbeat, removeHeartbeat, getActiveUsernames } from "@/lib/presence";
 
 export const runtime = "nodejs";
 
@@ -12,9 +12,12 @@ type RelayMessage = {
   timestamp: number;
 };
 
-// In-memory message bus and active heartbeats
-const messageQueue: RelayMessage[] = [];
-const userHeartbeats = new Map<string, number>();
+// In-memory message bus persisted across hot-reloads
+declare global {
+  var __clinicMessageQueue: RelayMessage[] | undefined;
+}
+
+const messageQueue: RelayMessage[] = (globalThis.__clinicMessageQueue ??= []);
 
 export async function POST(request: Request) {
   try {
@@ -27,9 +30,9 @@ export async function POST(request: Request) {
 
     if (from) {
       if (body.type === "offline") {
-        userHeartbeats.delete(from);
+        removeHeartbeat(from);
       } else {
-        userHeartbeats.set(from, Date.now());
+        recordHeartbeat(from);
       }
     }
 
@@ -61,14 +64,7 @@ export async function GET(request: Request) {
   const now = Date.now();
 
   if (username) {
-    userHeartbeats.set(username, now);
-  }
-
-  // Prune heartbeats older than 30s
-  for (const [u, ts] of userHeartbeats.entries()) {
-    if (now - ts > 30_000) {
-      userHeartbeats.delete(u);
-    }
+    recordHeartbeat(username);
   }
 
   // Filter messages for this user (targeted to them or broadcast)
@@ -80,7 +76,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     messages,
-    activeUsers: Array.from(userHeartbeats.keys()),
+    activeUsers: getActiveUsernames(),
     timestamp: now,
   });
 }

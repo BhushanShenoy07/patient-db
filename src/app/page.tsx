@@ -45,6 +45,7 @@ type FollowupUpdate = {
   tags?: string[];
   hasReplies?: boolean;
   conversations?: FollowupConversation[];
+  attendingDoctor?: string | null;
 };
 type DoctorOption = { name: string; specialization: string; email: string; artUsername?: string };
 type ArtMessage = {
@@ -445,7 +446,19 @@ function ChatPanel({
                 <Avatar person={person} online={isPeerOnline} />
                 <div className="chat-contact-info">
                   <div className="chat-contact-top-row">
-                    <span className="chat-contact-name">{person.name}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span className="chat-contact-name">{person.name}</span>
+                      {isPeerOnline ? (
+                        <span style={{ fontSize: "10px", color: "var(--emerald-600)", fontWeight: 700, backgroundColor: "var(--emerald-50)", border: "1px solid var(--emerald-line)", padding: "1px 6px", borderRadius: "10px", display: "inline-flex", alignItems: "center", gap: "3px" }}>
+                          <span style={{ width: "5px", height: "5px", borderRadius: "50%", backgroundColor: "var(--emerald-500)" }} />
+                          Online
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: "10px", color: "var(--ink-400)", backgroundColor: "var(--surface-subtle)", padding: "1px 5px", borderRadius: "10px" }}>
+                          Offline
+                        </span>
+                      )}
+                    </div>
                     {last && <span className="chat-contact-time">{timeLabel(last.at)}</span>}
                   </div>
                   <div className="chat-contact-bottom-row">
@@ -484,9 +497,12 @@ function ChatPanel({
                     <span>@{peer.artUsername}</span>
                     <span>·</span>
                     {online.has(peer.artUsername.toLowerCase()) ? (
-                      <span className="chat-peer-online-tag">Online now</span>
+                      <span className="chat-peer-online-tag" style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                        <span style={{ width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "var(--emerald-500)" }} />
+                        Online now
+                      </span>
                     ) : (
-                      <span>Offline</span>
+                      <span style={{ color: "var(--ink-400)" }}>Offline</span>
                     )}
                   </div>
                 </div>
@@ -979,17 +995,56 @@ export default function Home() {
         .then(r => r.json())
         .then(body => {
           if (Array.isArray(body.people)) {
-            setPeople(body.people);
+            setPeople(prev => {
+              if (
+                prev.length === body.people.length &&
+                prev.every((p, i) => p.artUsername === body.people[i]?.artUsername && p.name === body.people[i]?.name)
+              ) {
+                return prev;
+              }
+              return body.people;
+            });
           }
           if (Array.isArray(body.activeUsernames)) {
-            setOnlineUsers(new Set(body.activeUsernames.map((u: string) => u.toLowerCase())));
+            const nextOnline = new Set<string>(body.activeUsernames.map((u: string) => u.toLowerCase()));
+            setOnlineUsers(prev => {
+              if (prev.size === nextOnline.size && Array.from(prev).every(u => nextOnline.has(u))) {
+                return prev;
+              }
+              return nextOnline;
+            });
           }
         })
-        .catch(() => setPeople([]));
+        .catch(() => {});
     };
     fetchDir();
     const id = setInterval(fetchDir, 10_000);
     return () => clearInterval(id);
+  }, [user]);
+
+  // Keep doctor and receptionist online continuously & pulse heartbeat on focus/visibility
+  useEffect(() => {
+    if (!user) return;
+    const sendPulse = () => {
+      fetch("/api/clinic/heartbeat").catch(() => {});
+      checkUser(user.artUsername || "");
+    };
+
+    const pulseTimer = setInterval(sendPulse, 10_000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        sendPulse();
+      }
+    };
+
+    window.addEventListener("focus", sendPulse);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      clearInterval(pulseTimer);
+      window.removeEventListener("focus", sendPulse);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, [user]);
 
   useEffect(() => {
@@ -1116,8 +1171,9 @@ export default function Home() {
         const matchSubject = low(u.subject).includes(q);
         const matchId = low(u.id).includes(q);
         const matchMsg = low(u.message).includes(q);
+        const matchDoc = low(u.attendingDoctor || "").includes(q);
         const matchConv = (u.conversations || []).some(c => low(c.message).includes(q) || low(c.from).includes(q));
-        if (!matchName && !matchEmail && !matchSubject && !matchId && !matchMsg && !matchConv) return false;
+        if (!matchName && !matchEmail && !matchSubject && !matchId && !matchMsg && !matchDoc && !matchConv) return false;
       }
       return true;
     });
@@ -1136,8 +1192,14 @@ export default function Home() {
       const response = await fetch("/api/clinic/records");
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load clinic records.");
-      setRecords(body.records || []);
-      if (!silent) setToast(`Synchronized ${(body.records || []).length} clinic records.`);
+      const incoming = body.records || [];
+      setRecords(prev => {
+        if (prev.length === incoming.length && JSON.stringify(prev) === JSON.stringify(incoming)) {
+          return prev;
+        }
+        return incoming;
+      });
+      if (!silent) setToast(`Synchronized ${incoming.length} clinic records.`);
     } catch (e) {
       if (!silent) setToast(e instanceof Error ? e.message : "Data synchronization error.");
     } finally {
@@ -1152,7 +1214,21 @@ export default function Home() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load follow-up records.");
       if (Array.isArray(body.updates)) {
-        setFollowupUpdates(body.updates);
+        setFollowupUpdates(prev => {
+          if (prev.length === body.updates.length) {
+            const same = prev.every((item, i) => {
+              const b = body.updates[i];
+              return (
+                item.id === b.id &&
+                item.updatedAt === b.updatedAt &&
+                item.message === b.message &&
+                (item.conversations?.length || 0) === (b.conversations?.length || 0)
+              );
+            });
+            if (same) return prev;
+          }
+          return body.updates;
+        });
         if (forceRefresh && !silent) {
           setToast(`Inbox refreshed with ${body.updates.length} message threads.`);
         }
@@ -1746,11 +1822,16 @@ export default function Home() {
             </div>
             <div className="sidebar-doctor-meta">
               <div className="sidebar-doctor-name">{user.doctorName || user.name}</div>
-              <div className="sidebar-doctor-role">
-                {user.role === "doctor" ? "Physician · MD" : "Front Desk Coordinator"}
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                <div className="sidebar-doctor-role">
+                  {user.role === "doctor" ? "Physician · MD" : "Front Desk Coordinator"}
+                </div>
+                <span className="clinical-badge completed" style={{ fontSize: "9.5px", padding: "1px 5px", lineHeight: "1.2" }}>
+                  ● Online
+                </span>
               </div>
             </div>
-            <div className="sidebar-status-dot" title="Account Active" />
+            <div className="sidebar-status-dot online" title="Status: Online & Ready" />
           </div>
 
           {/* NAVIGATION MENU */}
@@ -1861,6 +1942,62 @@ export default function Home() {
                  tab === "followups" ? "Care Inbox & Freshdesk" :
                  tab === "messages" ? "Live Staff Chat (ADK)" : "Clinical Operations Analytics"}
               </h1>
+            </div>
+
+            {/* Real-time Staff Presence Indicator */}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", margin: "0 auto 0 16px" }}>
+              {isDoctorRole ? (
+                (() => {
+                  const recep = people.find(p => p.role === "receptionist");
+                  const isRecepOnline = recep && onlineUsers.has(recep.artUsername.toLowerCase());
+                  return (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "12px",
+                        background: "#ffffff",
+                        padding: "5px 12px",
+                        borderRadius: "20px",
+                        border: "1px solid var(--line-200)",
+                        boxShadow: "var(--shadow-xs)",
+                      }}
+                    >
+                      <span style={{ color: "var(--ink-500)", fontWeight: 500 }}>Reception Desk ({recep?.name || "Front Desk"}):</span>
+                      <span style={{ fontWeight: 700, color: isRecepOnline ? "var(--emerald-600)" : "var(--ink-400)", display: "flex", alignItems: "center", gap: "4px" }}>
+                        <span style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: isRecepOnline ? "var(--emerald-500)" : "var(--ink-400)" }} />
+                        {isRecepOnline ? "Online" : "Away"}
+                      </span>
+                    </div>
+                  );
+                })()
+              ) : (
+                (() => {
+                  const onlineDocs = people.filter(p => p.role === "doctor" && onlineUsers.has(p.artUsername.toLowerCase()));
+                  return (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "12px",
+                        background: "#ffffff",
+                        padding: "5px 12px",
+                        borderRadius: "20px",
+                        border: "1px solid var(--line-200)",
+                        boxShadow: "var(--shadow-xs)",
+                      }}
+                    >
+                      <span style={{ color: "var(--ink-500)", fontWeight: 500 }}>Physicians Online:</span>
+                      <span style={{ fontWeight: 700, color: onlineDocs.length > 0 ? "var(--emerald-600)" : "var(--ink-400)", display: "flex", alignItems: "center", gap: "4px" }}>
+                        <span style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: onlineDocs.length > 0 ? "var(--emerald-500)" : "var(--ink-400)" }} />
+                        {onlineDocs.length > 0 ? `${onlineDocs.length} Active (${onlineDocs.map(d => d.name.replace(/^dr\.?\s*/i, "")).join(", ")})` : "None Active"}
+                      </span>
+                    </div>
+                  );
+                })()
+              )}
             </div>
 
             {/* ACTION PILL BUTTONS (IMAGE 1 STYLE) */}
@@ -2822,7 +2959,18 @@ export default function Home() {
                           <IconStethoscope size={18} />
                         </div>
                         <div>
-                          <div style={{ fontSize: "14px", fontWeight: 700, color: "var(--ink-900)" }}>{doc.name}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <div style={{ fontSize: "14px", fontWeight: 700, color: "var(--ink-900)" }}>{doc.name}</div>
+                            {onlineUsers.has(String(doc.artUsername || doc.email.split("@")[0]).toLowerCase()) ? (
+                              <span className="clinical-badge completed" style={{ fontSize: "10.5px", padding: "1px 6px" }}>
+                                ● Online now
+                              </span>
+                            ) : (
+                              <span className="clinical-badge pending" style={{ fontSize: "10.5px", padding: "1px 6px", color: "var(--ink-500)" }}>
+                                Offline
+                              </span>
+                            )}
+                          </div>
                           <span className="specialty-tag">{doc.specialization}</span>
                         </div>
                       </div>
@@ -3067,7 +3215,7 @@ export default function Home() {
                       {/* Right Badges */}
                       <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
                         <span style={{ fontSize: "11px", color: "var(--ink-500)", background: "#ffffff", border: "1px solid var(--line-200)", padding: "2px 8px", borderRadius: "4px" }}>
-                          {isDoctorRole ? `Physician: ${user.doctorName}` : "Assigned: Receptionist"}
+                          Physician: {u.attendingDoctor || (isDoctorRole ? user.doctorName : "Clinic Physician")}
                         </span>
                         {u.priority === 4 ? (
                           <span className="clinical-badge cancelled">
