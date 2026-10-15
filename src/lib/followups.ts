@@ -220,6 +220,15 @@ export async function createFollowupTicket(input: {
   let freshdeskResult = null;
 
   if (hasFreshdeskConfig()) {
+    const responderIdValue = process.env.FRESHDESK_RESPONDER_ID?.trim();
+    if (responderIdValue && !/^[1-9]\d*$/.test(responderIdValue)) {
+      throw new Error("FRESHDESK_RESPONDER_ID must be a positive numeric Freshdesk agent ID.");
+    }
+    const responderId = responderIdValue ? Number(responderIdValue) : undefined;
+    if (responderId !== undefined && !Number.isSafeInteger(responderId)) {
+      throw new Error("FRESHDESK_RESPONDER_ID must be a positive numeric Freshdesk agent ID.");
+    }
+
     const buildPayload = (includeCompany: boolean) => {
       const companyVal = process.env.FRESHDESK_COMPANY_ID?.trim();
       const numComp = companyVal && !isNaN(Number(companyVal)) ? Number(companyVal) : null;
@@ -231,7 +240,7 @@ export async function createFollowupTicket(input: {
         priority: input.priority || 1,
         status: 2,
         source: 2,
-        responder_id: 1130009360826, // Assign Receptionist agent so customer replies notify the receptionist!
+        ...(responderId ? { responder_id: responderId } : {}),
         tags: input.tags,
         ...(uniqueCc.length ? { cc_emails: uniqueCc } : {}),
         ...(includeCompany && numComp ? { company_id: numComp } : {}),
@@ -486,12 +495,13 @@ function saveTicketsToDisk(tickets: any[]) {
 export function invalidateTicketsCache() {
   globalThis.__clinicTicketsCache = [];
   globalThis.__clinicTicketsCacheTime = 0;
+  globalThis.__clinicConversationCache?.clear();
   try {
     if (fs.existsSync(DISK_CACHE_PATH)) fs.unlinkSync(DISK_CACHE_PATH);
   } catch {}
 }
 
-export async function getClinicTicketsWithConversations(limit = 30) {
+export async function getClinicTicketsWithConversations(limit = 30, forceRefreshConversations = false) {
   if (!hasFreshdeskConfig()) {
     return localTickets.map(t => ({
       id: String(t.id),
@@ -555,15 +565,16 @@ export async function getClinicTicketsWithConversations(limit = 30) {
     const clinicTickets = (tickets || []).filter(isClinicalTicket);
 
     const enriched = await Promise.all(
-      clinicTickets.map(async (t: any) => {
+      clinicTickets.map(async (t: any, index: number) => {
         let conversations: any[] = [];
         const hasRealReplies = Boolean(
           t.stats && (t.stats.agent_responded_at || t.stats.requester_responded_at || t.stats.first_responded_at)
         );
+        const cached = conversationCache.get(String(t.id));
+        const shouldFetchConversations = hasRealReplies || (forceRefreshConversations && index < 10);
 
-        if (hasRealReplies) {
-          const cached = conversationCache.get(String(t.id));
-          if (cached && cached.updatedAt === t.updated_at) {
+        if (shouldFetchConversations) {
+          if (!forceRefreshConversations && cached && cached.updatedAt === t.updated_at) {
             conversations = cached.conversations;
           } else {
             try {
@@ -587,6 +598,8 @@ export async function getClinicTicketsWithConversations(limit = 30) {
             }
             conversationCache.set(String(t.id), { updatedAt: t.updated_at, conversations });
           }
+        } else if (cached) {
+          conversations = cached.conversations;
         }
 
         const requester = t.requester || {};

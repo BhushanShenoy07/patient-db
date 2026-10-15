@@ -3,16 +3,18 @@ import { readClinicSession, sameDoctor } from "@/lib/auth";
 import { getClinicTicketsWithConversations, invalidateTicketsCache, replyToFreshdeskTicket } from "@/lib/followups";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const session = readClinicSession(request);
   if (!session) return NextResponse.json({ error: "Sign in to view clinic communications." }, { status: 401 });
   try {
     const { searchParams } = new URL(request.url);
-    if (searchParams.get("refresh") === "1" || searchParams.get("refresh") === "true") {
+    const forceRefresh = searchParams.get("refresh") === "1" || searchParams.get("refresh") === "true";
+    if (forceRefresh) {
       invalidateTicketsCache();
     }
-    const updates = await getClinicTicketsWithConversations(50);
+    const updates = await getClinicTicketsWithConversations(50, forceRefresh);
 
     const docName = String(session.doctorName || "").toLowerCase().replace(/^dr\.?\s*/, "").trim();
     const docEmail = String(session.email || "").toLowerCase().trim();
@@ -64,7 +66,10 @@ export async function GET(request: Request) {
             return u;
           })
       : updates.filter(u => !u.tags?.includes("doctor_notification") && u.email.toLowerCase() !== docEmail);
-    return NextResponse.json({ ok: true, updates: filteredUpdates });
+    return NextResponse.json(
+      { ok: true, updates: filteredUpdates },
+      { headers: { "Cache-Control": "no-store, max-age=0" } }
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not load clinic communications.";
     return NextResponse.json({ error: message }, { status: 502 });

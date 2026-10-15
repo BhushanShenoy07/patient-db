@@ -302,6 +302,12 @@ function patientsTableId() {
   return process.env.AIRTABLE_PATIENTS_TABLE_ID?.trim() || "tblP3i2fS5SRkdkx9";
 }
 
+function patientIdentityKey(fields: Record<string, any>) {
+  const email = String(fields["Patient Email"] || fields.Email || "").trim().toLowerCase();
+  const name = String(fields["Patient Name"] || "").trim().toLowerCase();
+  return email && name ? `${email}::${name}` : email || name;
+}
+
 export async function airtableRequest(path = "", init: RequestInit = {}, tableOverride?: string) {
   const c = config();
   const table = tableOverride || c.table;
@@ -355,14 +361,14 @@ export async function listAirtableRecords() {
       const demographicsMap = new Map<string, Record<string, any>>();
       for (const pr of patientRecords) {
         const pf = pr.fields || {};
-        const key = String(pf["Patient Email"] || pf["Email"] || pf["Patient Name"] || "").trim().toLowerCase();
+        const key = patientIdentityKey(pf);
         if (key) demographicsMap.set(key, { ...pf, _patientId: pr.id });
       }
 
       // Merge demographics into appointments
       const enriched = apptRecords.map((r: any) => {
         const rf = r.fields || {};
-        const key = String(rf["Patient Email"] || rf["Email"] || rf["Patient Name"] || "").trim().toLowerCase();
+        const key = patientIdentityKey(rf);
         const demo = demographicsMap.get(key);
         if (demo) {
           return {
@@ -381,14 +387,12 @@ export async function listAirtableRecords() {
 
       // Include standalone registered patients from Patients table
       const apptKeys = new Set(
-        apptRecords.map((r: any) =>
-          String(r.fields?.["Patient Email"] || r.fields?.["Email"] || r.fields?.["Patient Name"] || "").trim().toLowerCase()
-        )
+        apptRecords.map((r: any) => patientIdentityKey(r.fields || {}))
       );
 
       for (const pr of patientRecords) {
         const pf = pr.fields || {};
-        const key = String(pf["Patient Email"] || pf["Email"] || pf["Patient Name"] || "").trim().toLowerCase();
+        const key = patientIdentityKey(pf);
         if (key && !apptKeys.has(key)) {
           enriched.push({
             id: pr.id,
@@ -521,9 +525,9 @@ export async function saveAirtableRecord(
               try {
                 const ptId = patientsTableId();
                 const existing = await fetchTableRecords(ptId);
-                const email = String(demoFields["Patient Email"] || "").toLowerCase().trim();
+                const patientKey = patientIdentityKey(demoFields);
                 const matched = (existing || []).find(
-                  (r: any) => String(r.fields?.["Patient Email"] || "").toLowerCase().trim() === email
+                  (r: any) => patientIdentityKey(r.fields || {}) === patientKey
                 );
                 if (matched) {
                   await airtableRequest(`/${encodeURIComponent(matched.id)}`, {

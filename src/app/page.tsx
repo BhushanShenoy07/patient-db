@@ -1106,7 +1106,9 @@ export default function Home() {
     const byKey = new Map<string, RecordItem>();
     for (const r of records) {
       const f = r.fields;
-      const key = low(f[COL.email]) || low(f[COL.name]);
+      const email = low(f[COL.email]);
+      const name = low(f[COL.name]);
+      const key = email && name ? `${email}::${name}` : email || name;
       if (!key) continue;
       const prior = byKey.get(key);
       if (!prior || isRegistered(r)) {
@@ -1210,7 +1212,7 @@ export default function Home() {
   async function loadFollowupUpdates(silent = false, forceRefresh = false) {
     try {
       const url = forceRefresh ? "/api/follow-up/inbox?refresh=1" : "/api/follow-up/inbox";
-      const response = await fetch(url);
+      const response = await fetch(url, { cache: "no-store" });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load follow-up records.");
       if (Array.isArray(body.updates)) {
@@ -1218,11 +1220,21 @@ export default function Home() {
           if (prev.length === body.updates.length) {
             const same = prev.every((item, i) => {
               const b = body.updates[i];
+              const previousConversations = item.conversations || [];
+              const nextConversations = b.conversations || [];
               return (
                 item.id === b.id &&
                 item.updatedAt === b.updatedAt &&
                 item.message === b.message &&
-                (item.conversations?.length || 0) === (b.conversations?.length || 0)
+                previousConversations.length === nextConversations.length &&
+                previousConversations.every((conversation, conversationIndex) => {
+                  const nextConversation = nextConversations[conversationIndex];
+                  return conversation.id === nextConversation.id &&
+                    conversation.message === nextConversation.message &&
+                    conversation.from === nextConversation.from &&
+                    conversation.incoming === nextConversation.incoming &&
+                    conversation.createdAt === nextConversation.createdAt;
+                })
               );
             });
             if (same) return prev;
@@ -1397,9 +1409,6 @@ export default function Home() {
   async function handlePatientSubmit(e: FormEvent) {
     e.preventDefault();
     if (!patientForm.name.trim() || !patientForm.email.trim()) return setToast("Full patient name and email address are required.");
-    if (patients.some(p => p.id !== editingPatient && low(p.fields[COL.email]) === low(patientForm.email))) {
-      return setToast("A registered patient with this email already exists.");
-    }
     setBusy(true);
     try {
       const fields: Fields = {

@@ -8,7 +8,7 @@ Set `CLINIC_USERS_JSON` to a JSON array of staff accounts in the server environm
 
 Set these values in the server environment (for local development, `.env.local`):
 
-- `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY`, and `FRESHDESK_COMPANY_ID` to send appointment and follow-up email through Freshdesk. The company ID is the Freshdesk **Clinic Desk** company used for ticket creation.
+- `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY`, and `FRESHDESK_COMPANY_ID` to send appointment and follow-up email through Freshdesk. The company ID is the Freshdesk **Clinic Desk** company used for ticket creation. `FRESHDESK_RESPONDER_ID` is optional; set it to a positive numeric ID for an active agent in this Freshdesk account if you want tickets assigned to that agent. When unset, Freshdesk applies its default assignment rules.
 - `NEXT_PUBLIC_APP_URL` to the public HTTPS address of this app so patient links work outside the clinic network.
 - `CLINIC_SESSION_SECRET` must remain stable and contain at least 32 characters; appointment and follow-up links use it to encrypt their short-lived tokens.
 - `ZOOM_ACCOUNT_ID`, `ZOOM_USER_ID` (the clinic meeting host's Zoom email or user ID), `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET` from a Zoom Server-to-Server OAuth app with the meeting master scopes. Keep these server-side; do not put them in Clinic Settings or browser storage. The app requests and uses OAuth tokens on the server when it creates, updates, or deletes online appointment meetings.
